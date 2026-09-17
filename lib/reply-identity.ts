@@ -35,6 +35,16 @@ function domainOf(email: string): string {
   return at > 0 ? email.slice(at + 1).toLowerCase() : '';
 }
 
+/**
+ * Pick the identity a message was delivered to, among the user's own. Never
+ * rewrites `From:` - it only chooses which configured address sends.
+ *
+ * Recipients are scanned in To, then Cc, then Bcc order, exact matches before
+ * `+tag`-stripped ones. Scanning the identities instead would let the identity
+ * list's order decide: `sortIdentities` deliberately puts the login's own
+ * address first, so `To: team@, Cc: you@` would reply as you rather than as
+ * the team - the exact case this is meant to fix.
+ */
 export function findReplyIdentityId(
   identities: Identity[],
   recipients?: ReplyRecipients,
@@ -55,16 +65,38 @@ export function findReplyIdentityId(
     return null;
   }
 
-  const exactMatches = new Set(receivedAddresses.map(normalizeEmailAddress));
-  const exactIdentity = identities.find((identity) => exactMatches.has(normalizeEmailAddress(identity.email)));
-  if (exactIdentity) {
-    return exactIdentity.id;
+  const byExact = new Map<string, string>();
+  const byBase = new Map<string, { id: string; untagged: boolean }>();
+  for (const identity of identities) {
+    const exact = normalizeEmailAddress(identity.email);
+    const base = normalizeBaseEmailAddress(identity.email);
+    if (!byExact.has(exact)) {
+      byExact.set(exact, identity.id);
+    }
+    // For a `+tag` delivery with no exact identity, the untagged identity is the
+    // answer; a differently-tagged sibling would disclose an unrelated tag.
+    const untagged = exact === base;
+    const existing = byBase.get(base);
+    if (!existing || (untagged && !existing.untagged)) {
+      byBase.set(base, { id: identity.id, untagged });
+    }
   }
 
-  const baseMatches = new Set(receivedAddresses.map(normalizeBaseEmailAddress));
-  const baseIdentity = identities.find((identity) => baseMatches.has(normalizeBaseEmailAddress(identity.email)));
+  for (const address of receivedAddresses) {
+    const exactId = byExact.get(normalizeEmailAddress(address));
+    if (exactId) {
+      return exactId;
+    }
+  }
 
-  return baseIdentity?.id ?? null;
+  for (const address of receivedAddresses) {
+    const baseMatch = byBase.get(normalizeBaseEmailAddress(address));
+    if (baseMatch) {
+      return baseMatch.id;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -93,6 +125,38 @@ export function findComposeIdentityId(
   const baseIdentity = identities.find((identity) => normalizeBaseEmailAddress(identity.email) === base);
 
   return baseIdentity?.id ?? null;
+}
+
+/**
+ * Address whose identity `findComposeIdentityId` should preselect, based on the
+ * mailbox currently open.
+ *
+ * Selecting a shared/group folder in the "Shared" sidebar section does not move
+ * the active account - a delegated mailbox has no separate login, it is reached
+ * through the viewer's - so the composer fell back to the reaching login's
+ * primary address and started every new message as the wrong sender. The owner
+ * of the selected folder is the correct default there.
+ *
+ * `accountName` is the JMAP `Account.name`, which RFC 8620 describes as "e.g.,
+ * the email address of the account". Servers that put a human label there
+ * instead simply produce no identity match, and the caller keeps the primary
+ * identity - exactly the previous behaviour. The `@` test keeps that intent
+ * explicit rather than relying on the match to fail.
+ */
+export function resolveComposeAccountEmail(
+  mailboxes: Array<{ id: string; isShared?: boolean; accountName?: string }>,
+  selectedMailbox?: string | null,
+  activeAccountEmail?: string | null,
+): string | undefined {
+  const current = selectedMailbox
+    ? mailboxes.find((mailbox) => mailbox.id === selectedMailbox)
+    : undefined;
+
+  if (current?.isShared && current.accountName?.includes('@')) {
+    return current.accountName;
+  }
+
+  return activeAccountEmail ?? undefined;
 }
 
 /**
@@ -134,6 +198,16 @@ export function findDraftIdentityId(
   return base?.id ?? null;
 }
 
+/**
+ * How far `resolveReplyFrom` goes when matching received addresses:
+ * `exact` stops at the user's configured identities (steps 1-2 below),
+ * `domain` also takes the same-domain catch-all step (3), which rewrites
+ * `From:` to an address the user has not configured. Deployments where the
+ * extra addresses on a domain are distribution lists rather than aliases
+ * want `exact` (#1000).
+ */
+export type ReplyIdentityMatchMode = 'exact' | 'domain';
+
 export interface ReplyFromResolution {
   /** Identity to use for JMAP `identityId` and the SMTP envelope MAIL FROM. */
   identityId: string;
@@ -159,12 +233,14 @@ export interface ReplyFromResolution {
  *      sub-addressing, reply as that identity with no override.
  *   3. Else if a recipient address is on a domain that one of the identities
  *      uses, treat that recipient as a catch-all alias: return the matching
- *      identity + the recipient as a header-From override.
+ *      identity + the recipient as a header-From override. Skipped in
+ *      `exact` match mode.
  *   4. Else return `null` (caller falls back to primary identity).
  */
 export function resolveReplyFrom(
   identities: Identity[],
   recipients?: ReplyRecipients,
+  matchMode: ReplyIdentityMatchMode = 'domain',
 ): ReplyFromResolution | null {
   if (identities.length === 0 || !recipients) {
     return null;
@@ -199,6 +275,10 @@ export function resolveReplyFrom(
   );
   if (baseIdentity) {
     return { identityId: baseIdentity.id };
+  }
+
+  if (matchMode !== 'domain') {
+    return null;
   }
 
   const ownedDomains = new Set(identities.map((i) => domainOf(i.email)).filter(Boolean));

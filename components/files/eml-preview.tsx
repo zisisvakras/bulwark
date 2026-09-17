@@ -3,6 +3,7 @@
 import { useTranslations } from "next-intl";
 import { Paperclip, Download } from "lucide-react";
 import { sanitizeEmailHtmlForIframe } from "@/lib/email-sanitization";
+import { getEffectiveTimeZone } from "@/lib/timezone";
 
 // A parsed message/rfc822 (.eml), as produced by postal-mime. Only the fields
 // this preview renders are typed.
@@ -40,10 +41,14 @@ function escapeHtml(s: string): string {
 export function EmlPreview({ message }: { message: ParsedEml }) {
   const t = useTranslations("email_viewer");
 
+  // srcDoc gets a fragment, not a document, so the iframe's implicit <body>
+  // is the browser's - left-to-right regardless of what the mail is written
+  // in. dir="auto" on a wrapper we do control lets the first strong character
+  // pick the direction, matching the main viewer.
   const bodyDoc = message.html
-    ? sanitizeEmailHtmlForIframe(message.html)
+    ? `<div dir="auto">${sanitizeEmailHtmlForIframe(message.html)}</div>`
     : message.text
-      ? `<pre style="white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,monospace;margin:0;padding:8px">${escapeHtml(message.text)}</pre>`
+      ? `<pre dir="auto" style="white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,monospace;margin:0;padding:8px">${escapeHtml(message.text)}</pre>`
       : "";
 
   const downloadAttachment = (att: NonNullable<ParsedEml["attachments"]>[number]) => {
@@ -74,7 +79,7 @@ export function EmlPreview({ message }: { message: ParsedEml }) {
           <div><span className="font-medium text-foreground">{t("to")}: </span><bdi>{message.to.map(formatAddress).join(", ")}</bdi></div>
         )}
         {message.date && (
-          <div><span className="font-medium text-foreground">{t("date")}: </span>{new Date(message.date).toLocaleString()}</div>
+          <div><span className="font-medium text-foreground">{t("date")}: </span>{new Date(message.date).toLocaleString(undefined, { timeZone: getEffectiveTimeZone() })}</div>
         )}
       </div>
       {bodyDoc && (

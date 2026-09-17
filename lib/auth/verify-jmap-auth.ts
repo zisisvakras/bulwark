@@ -1,15 +1,28 @@
-import { isPublicHttpUrl } from '@/lib/security/url-guard';
+import {
+  DisallowedUrlError,
+  fetchPublicUrl,
+  isPublicHttpUrl,
+  type PublicFetchResponse,
+} from '@/lib/security/url-guard';
 
 const VERIFY_TIMEOUT_MS = 10000;
 const MAX_REDIRECTS = 3;
 
 export class JmapAuthVerificationError extends Error {
   status: number;
+  /**
+   * HTTP status the JMAP server itself answered with, when the failure came
+   * from an upstream response rather than URL validation, a timeout or a
+   * network error. Lets callers tell a definitive credential rejection (401)
+   * apart from everything else that happens to map to the same `status`.
+   */
+  upstreamStatus?: number;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, upstreamStatus?: number) {
     super(message);
     this.name = 'JmapAuthVerificationError';
     this.status = status;
+    this.upstreamStatus = upstreamStatus;
   }
 }
 
@@ -18,6 +31,15 @@ function isSupportedProtocol(protocol: string): boolean {
 }
 
 export function normalizeJmapServerUrl(serverUrl: string): string {
+  // App-relative URLs (the dev mock JMAP server, e.g. /api/dev-jmap) have no
+  // host or protocol to validate; they can only ever target this app itself.
+  // Protocol-relative URLs (//host/...) are NOT app-relative and fall through
+  // to the absolute-URL parse below, which rejects them.
+  if (serverUrl.startsWith('/') && !serverUrl.startsWith('//')) {
+    const url = new URL(serverUrl, 'http://relative.invalid');
+    return url.pathname.replace(/\/+$/, '');
+  }
+
   let url: URL;
   try {
     url = new URL(serverUrl);
@@ -82,19 +104,24 @@ export async function verifyJmapAuth(
 
   try {
     let currentUrl = `${normalizedServerUrl}/.well-known/jmap`;
-    let response: Response | undefined;
+    let response: Response | PublicFetchResponse | undefined;
 
     for (let i = 0; i <= MAX_REDIRECTS; i++) {
       if (!options.trusted && !(await isPublicHttpUrl(currentUrl))) {
         throw new JmapAuthVerificationError('Server URL is not allowed', 400);
       }
 
-      response = await fetch(currentUrl, {
+      const requestInit = {
         method: 'GET',
         headers: { Authorization: authHeader },
         signal: controller.signal,
-        redirect: 'manual',
-      });
+      };
+      // Untrusted (user-supplied) endpoints connect through the rebinding-safe
+      // fetch so the address validated above is the one the socket uses.
+      // Admin-configured servers may legitimately live on private addresses.
+      response = options.trusted
+        ? await fetch(currentUrl, { ...requestInit, redirect: 'manual' })
+        : await fetchPublicUrl(currentUrl, requestInit);
 
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get('location');
@@ -121,6 +148,7 @@ export async function verifyJmapAuth(
           ? 'Authentication failed'
           : 'Failed to verify JMAP session',
         response.status === 401 || response.status === 403 ? 401 : 502,
+        response.status,
       );
     }
 
@@ -133,6 +161,9 @@ export async function verifyJmapAuth(
   } catch (error) {
     if (error instanceof JmapAuthVerificationError) {
       throw error;
+    }
+    if (error instanceof DisallowedUrlError) {
+      throw new JmapAuthVerificationError('Server URL is not allowed', 400);
     }
     if (error instanceof Error && error.name === 'AbortError') {
       throw new JmapAuthVerificationError('JMAP session verification timed out', 504);

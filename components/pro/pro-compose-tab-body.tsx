@@ -1,11 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { EmailComposer, type ComposerDraftData } from "@/components/email/email-composer";
 import { ErrorBoundary, ComposerErrorFallback } from "@/components/error";
 import { useAuthStore } from "@/stores/auth-store";
 import { useEmailStore } from "@/stores/email-store";
+import { useAccountStore } from "@/stores/account-store";
+import { resolveComposeAccountEmail } from "@/lib/reply-identity";
 import { toast } from "@/stores/toast-store";
 import { useProTabStore, registerProTabCloseInterceptor, type ProComposeTabData } from "@/stores/pro-tab-store";
 import { debug } from "@/lib/debug";
@@ -40,7 +42,7 @@ export function ProComposeTabBody({ tabId, data }: ProComposeTabBodyProps) {
 
   // Set by the composer to its dirty-aware close handler. Lets the Pro tab
   // bar's "X" route through the same "Save or discard draft?" guard.
-  const requestCloseRef = useRef<(() => void) | null>(null);
+  const requestCloseRef = useRef<((afterClose?: () => void) => void) | null>(null);
 
   const handleScheduledSendCreated = useCallback(async () => {
     if (client) {
@@ -96,13 +98,13 @@ export function ProComposeTabBody({ tabId, data }: ProComposeTabBodyProps) {
       // viewer and list reflect the action (same behaviour as inline compose).
       if (data.sourceEmailId && (data.mode === 'reply' || data.mode === 'replyAll')) {
         try {
-          await client.setKeyword(data.sourceEmailId, '$answered');
+          await useEmailStore.getState().markEmailKeyword(client, data.sourceEmailId, '$answered');
         } catch (e) {
           debug.error('Failed to set $answered keyword:', e);
         }
       } else if (data.sourceEmailId && data.mode === 'forward') {
         try {
-          await client.setKeyword(data.sourceEmailId, '$forwarded');
+          await useEmailStore.getState().markEmailKeyword(client, data.sourceEmailId, '$forwarded');
         } catch (e) {
           debug.error('Failed to set $forwarded keyword:', e);
         }
@@ -183,6 +185,28 @@ export function ProComposeTabBody({ tabId, data }: ProComposeTabBodyProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Mirrors the standard shell (see the same prop in `components/mail/mail-app.tsx`).
+  // Without it `mode === 'compose'` resolves `findComposeIdentityId(identities,
+  // undefined)` -> null and every new message in the Pro shell defaults to the
+  // account owner, even with a shared folder open. The Pro shell hoists every
+  // "show composer" intent - including `mailto:` links - into a tab, so this
+  // omission covered the whole compose surface there.
+  //
+  // Read once, at mount: this is "the mailbox the message was started from",
+  // and the composer consumes it only while no identity has been picked yet.
+  // A tab body stays mounted (hidden) for as long as the tab is open, so
+  // subscribing to the mailbox list instead would re-render the composer - and
+  // its editor - on every counter refresh for the rest of the tab's life.
+  const [composeFromAccountEmail] = useState(() => {
+    const { mailboxes, selectedMailbox, viewingAccountId } = useEmailStore.getState();
+    const accountId = viewingAccountId ?? useAuthStore.getState().activeAccountId ?? '';
+    return resolveComposeAccountEmail(
+      mailboxes,
+      selectedMailbox,
+      useAccountStore.getState().getAccountById(accountId)?.email,
+    );
+  });
+
   return (
     <div className="flex h-full w-full flex-col bg-background">
       <ErrorBoundary fallback={ComposerErrorFallback}>
@@ -192,6 +216,7 @@ export function ProComposeTabBody({ tabId, data }: ProComposeTabBodyProps) {
           replyTo={data.replyTo}
           initialDraftText={data.initialDraftText}
           initialData={data.initialData}
+          composeFromAccountEmail={composeFromAccountEmail}
           onSend={handleSend}
           onScheduledSendCreated={handleScheduledSendCreated}
           onClose={handleClose}

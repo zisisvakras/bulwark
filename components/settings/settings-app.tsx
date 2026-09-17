@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo, useSyncExternalStore } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo, useSyncExternalStore } from 'react';
 import { useRouter } from '@/i18n/navigation';
 import { useTranslations, useMessages } from 'next-intl';
 import {
@@ -70,7 +70,7 @@ import { PluginIframeSlot } from '@/components/plugins/plugin-iframe-slot';
 import { offersForSlot as pluginOffersForSlot, subscribe as pluginRegistrySubscribe, get as getActivePlugin } from '@/lib/plugin-sandbox/registry';
 import { ProtocolHandlerSettings } from '@/components/settings/protocol-handler-settings';
 import { appPath, buildSettingsPath, parseSettingsPath } from '@/lib/deep-links';
-import { consumePendingDeepLink } from '@/lib/deep-link-handoff';
+import { consumePendingDeepLink, subscribePendingDeepLink } from '@/lib/deep-link-handoff';
 import { useDeepLinkUrl } from '@/hooks/use-deep-link-url';
 import { useProInterfaceActive } from '@/components/pro/pro-interface-redirect';
 import { useAuthStore, redirectToLogin, saveRedirectAfterLogin } from '@/stores/auth-store';
@@ -84,38 +84,24 @@ import { NavigationRail } from '@/components/layout/navigation-rail';
 import { SidebarAppsModal } from '@/components/layout/sidebar-apps-modal';
 import { InlineAppView } from '@/components/layout/inline-app-view';
 import { useSidebarApps } from '@/hooks/use-sidebar-apps';
+import { useResolvedSidebarApps } from '@/hooks/use-resolved-sidebar-apps';
 import { useIsEmbedded } from '@/hooks/use-is-embedded';
+import { useIsFocusedProTab } from '@/hooks/use-pane-context';
 import { ResizeHandle } from '@/components/layout/resize-handle';
 import { useConfig } from '@/hooks/use-config';
 import { usePolicyStore } from '@/stores/policy-store';
 import { cn } from '@/lib/utils';
+import {
+  type SettingsSearchTab,
+  type SubResult,
+  collectSubResults,
+  flattenStrings,
+  getByPath,
+  tabKeywords,
+  tabSearchPaths,
+} from '@/lib/settings-search';
 
-type Tab =
-  | 'account'
-  | 'language'
-  | 'notifications'
-  | 'appearance'
-  | 'layout'
-  | 'reading'
-  | 'composing'
-  | 'downloads'
-  | 'identities'
-  | 'vacation'
-  | 'filters'
-  | 'templates'
-  | 'folders'
-  | 'keywords'
-  | 'security'
-  | 'content_senders'
-  | 'calendar'
-  | 'contacts'
-  | 'files'
-  | 'protocol_handlers'
-  | 'sidebar_apps'
-  | 'about_data'
-  | 'themes'
-  | 'plugins'
-  | 'debug';
+type Tab = SettingsSearchTab;
 
 type TabGroup = 'general' | 'appearance' | 'mail' | 'privacy' | 'apps' | 'advanced';
 
@@ -162,181 +148,6 @@ const tabIcons: Record<Tab, LucideIcon> = {
 
 const tabGroupOrder: TabGroup[] = ['general', 'appearance', 'mail', 'privacy', 'apps', 'advanced'];
 
-// Translation paths per tab. Tabs that share a namespace (email_behavior,
-// appearance) explicitly list the subkeys they actually render so sub-results
-// are attributed to the correct tab. Tabs with their own namespace just point
-// at the namespace root.
-const tabSearchPaths: Record<Tab, string[]> = {
-  account: [
-    'settings.account.name_label',
-    'settings.account.username_label',
-    'settings.account.account_type_label',
-    'settings.account.auth_method_label',
-    'settings.account.email',
-    'settings.account.server',
-    'settings.account.storage',
-    'settings.account.accounts',
-  ],
-  language: ['settings.appearance.language'],
-  notifications: ['settings.notifications'],
-  appearance: [
-    'settings.appearance.theme',
-    'settings.appearance.font_size',
-    'settings.appearance.list_density',
-    'settings.appearance.animations',
-  ],
-  layout: [
-    'settings.appearance.toolbar_position',
-    'settings.appearance.toolbar_labels',
-    'settings.appearance.hide_account_switcher',
-    'settings.appearance.show_rail_account_list',
-    'settings.appearance.unified_mailbox',
-    'settings.appearance.all_mail',
-    'settings.appearance.colorful_sidebar_icons',
-    'settings.email_behavior.mail_layout',
-  ],
-  reading: [
-    'settings.email_behavior.mark_read',
-    'settings.email_behavior.archive_mode',
-    'settings.email_behavior.delete_action',
-    'settings.email_behavior.attachment_click_action',
-    'settings.email_behavior.attachment_image_previews',
-    'settings.email_behavior.attachment_position',
-    'settings.email_behavior.disable_threading',
-    'settings.email_behavior.emails_per_page',
-    'settings.email_behavior.hide_inline_image_attachments',
-    'settings.email_behavior.hover_actions',
-    'settings.email_behavior.permanently_delete_junk',
-    'settings.email_behavior.show_preview',
-  ],
-  composing: [
-    'settings.email_behavior.attachment_reminder',
-    'settings.email_behavior.auto_select_reply_identity',
-    'settings.email_behavior.plain_text_mode',
-    'settings.email_behavior.default_mail_program',
-    'settings.email_behavior.empty_subject_warning',
-    'settings.email_behavior.signature_position',
-    'settings.email_behavior.sub_address_delimiter',
-  ],
-  downloads: ['settings.downloads'],
-  identities: ['settings.identities'],
-  vacation: ['settings.vacation'],
-  filters: ['settings.filters'],
-  templates: ['settings.templates'],
-  folders: ['settings.folders'],
-  keywords: ['settings.keywords'],
-  security: ['settings.security'],
-  content_senders: [
-    'settings.email_behavior.always_light_mode',
-    'settings.email_behavior.external_content',
-    'settings.email_behavior.trusted_senders',
-  ],
-  calendar: ['calendar.settings', 'calendar.management'],
-  contacts: ['settings.contacts', 'contacts'],
-  files: ['settings.files'],
-  protocol_handlers: ['protocol_handlers'],
-  sidebar_apps: ['settings.sidebar_apps', 'sidebar_apps'],
-  about_data: ['settings.advanced'],
-  themes: [],
-  plugins: [],
-  debug: ['settings.advanced'],
-};
-
-// Extra English keywords per tab so common search terms hit even when the
-// translation doesn't contain the literal word.
-const tabKeywords: Record<Tab, string> = {
-  account: 'profile email password user signin signout reorder rearrange drag dropdown switcher multi-account',
-  language: 'locale region timezone date time format',
-  notifications: 'sound alert push badge',
-  appearance: 'theme dark light font size accent color animation density',
-  layout: 'toolbar sidebar account switcher unified mailbox icons rail',
-  reading: 'mark read preview thread conversation archive delete attachment open',
-  composing: 'editor signature plain text reply forward draft compose',
-  downloads: 'download filename template eml attachment save export',
-  identities: 'from address signature email',
-  vacation: 'auto reply away out of office holiday responder',
-  filters: 'sieve rules block junk forward',
-  templates: 'snippet quick reply',
-  folders: 'mailbox subscribe',
-  keywords: 'tags labels colors',
-  security: 'password 2fa two-factor passkey app password mfa',
-  content_senders: 'block sender remote images privacy tracking',
-  calendar: 'event schedule appointment meeting timezone',
-  contacts: 'address book contact',
-  files: 'attachments cloud drive storage upload',
-  protocol_handlers: 'mailto webcal links default app protocol handler',
-  sidebar_apps: 'apps webview iframe',
-  about_data: 'export import storage quota privacy backup',
-  themes: 'custom theme css skin appearance',
-  plugins: 'extensions addons',
-  debug: 'logs developer console diagnostic',
-};
-
-function flattenStrings(node: unknown, sink: string[]): void {
-  if (typeof node === 'string') {
-    sink.push(node);
-    return;
-  }
-  if (Array.isArray(node)) {
-    for (const item of node) flattenStrings(item, sink);
-    return;
-  }
-  if (node && typeof node === 'object') {
-    for (const value of Object.values(node)) flattenStrings(value, sink);
-  }
-}
-
-interface SubResult {
-  label: string;
-  description?: string;
-  // For plugin setting fields: the id of the plugin whose card needs to be
-  // expanded before the field becomes visible in the DOM.
-  pluginId?: string;
-}
-
-// Walk a translation subtree and emit sub-results for renderable settings.
-// Picks up:
-//   - bare string leaves (when a tab path points directly at a flat label)
-//   - objects with a `label` or `title` field (the standard pattern)
-//   - flat `*_label` string keys at any object level (e.g. `name_label`)
-function collectSubResults(node: unknown, sink: SubResult[]): void {
-  if (typeof node === 'string') {
-    sink.push({ label: node });
-    return;
-  }
-  if (!node || typeof node !== 'object' || Array.isArray(node)) return;
-  const obj = node as Record<string, unknown>;
-  const label = typeof obj.label === 'string' ? obj.label : (typeof obj.title === 'string' ? obj.title : undefined);
-  if (label) {
-    sink.push({
-      label,
-      description: typeof obj.description === 'string' ? obj.description : undefined,
-    });
-  }
-  for (const [key, value] of Object.entries(obj)) {
-    if (typeof value === 'string' && key !== 'label' && key !== 'title' && key.endsWith('_label')) {
-      sink.push({ label: value });
-    }
-  }
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      collectSubResults(value, sink);
-    }
-  }
-}
-
-function getByPath(obj: unknown, path: string): unknown {
-  let cur: unknown = obj;
-  for (const key of path.split('.')) {
-    if (cur && typeof cur === 'object' && key in (cur as Record<string, unknown>)) {
-      cur = (cur as Record<string, unknown>)[key];
-    } else {
-      return undefined;
-    }
-  }
-  return cur;
-}
-
 // Map legacy tab IDs to current ones; runs once on read of localStorage.
 const LEGACY_TAB_MAP: Record<string, Tab> = {
   email: 'reading',
@@ -381,6 +192,18 @@ function tabFromDeepLink(segments: string[] | null | undefined): SettingsTabId |
   return null;
 }
 
+// Toggling the Pro interface remounts the whole settings surface (enabling
+// replaces the route with /pro, which hosts its own SettingsApp; disabling
+// leaves /pro through a full page load back to /settings). The active tab
+// survives via localStorage, but the content pane's scroll offset would not -
+// and the toggle itself sits at the bottom of a long tab, so the user would
+// land back at the top of the page they were just on. Module scope covers the
+// client-side navigation; sessionStorage carries the offset across the full
+// page load, with a TTL so a stray unconsumed entry can't scroll a visit
+// minutes later.
+let parkedContentScroll: { tab: SettingsTabId; top: number; ts: number } | null = null;
+const SCROLL_RESTORE_KEY = 'settings-scroll-restore';
+
 export interface SettingsAppProps {
   /** Path segments after `/settings` - `['<tabId>']`. */
   linkSegments?: string[];
@@ -421,6 +244,16 @@ export function SettingsApp({ linkSegments }: SettingsAppProps = {}) {
     const tab = tabFromDeepLink(consumePendingDeepLink('settings'));
     if (tab) setActiveTab(tab);
   }, [linkSegments]);
+  // Pro shell only: this surface stays mounted for the whole session, so links
+  // arriving later (e.g. the sidebar's folder-settings gear) are delivered
+  // live instead of being parked for a mount that already happened.
+  useEffect(() => {
+    if (!isEmbedded) return;
+    return subscribePendingDeepLink('settings', (segments) => {
+      const tab = tabFromDeepLink(segments);
+      if (tab) setActiveTab(tab);
+    });
+  }, [isEmbedded]);
   const [mobileShowContent, setMobileShowContent] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [pendingHighlight, setPendingHighlight] = useState<{ tab: SettingsTabId; label: string; pluginId?: string } | null>(null);
@@ -429,7 +262,8 @@ export function SettingsApp({ linkSegments }: SettingsAppProps = {}) {
   const messages = useMessages() as Record<string, unknown>;
   const installedPlugins = usePluginStore((s) => s.plugins);
   const installedThemes = useThemeStore((s) => s.installedThemes);
-  const sidebarAppsList = useSettingsStore((s) => s.sidebarApps);
+  // Admin-pinned apps are searchable too - users can't add them, but they're listed.
+  const sidebarAppsList = useResolvedSidebarApps();
   const proInterface = useSettingsStore((s) => s.proInterface);
 
   // When set, the settings panel is scoped to a shared/group account: a reduced
@@ -639,11 +473,50 @@ export function SettingsApp({ linkSegments }: SettingsAppProps = {}) {
   // so the tab is only in the URL once the user is looking at its content.
   // Must sit above the early return below - it is a hook.
   const proInterfaceActive = useProInterfaceActive();
+  const isFocusedProTab = useIsFocusedProTab();
+  const settingsLinkPath = appPath(buildSettingsPath(!isDesktop && !mobileShowContent ? null : activeTab));
   useDeepLinkUrl(
-    !isAuthenticated || isEmbedded || proInterfaceActive
+    !isAuthenticated
       ? null
-      : appPath(buildSettingsPath(!isDesktop && !mobileShowContent ? null : activeTab)),
+      : isEmbedded
+        ? (isFocusedProTab ? settingsLinkPath : null)
+        : proInterfaceActive ? null : settingsLinkPath,
   );
+
+  // Park the content-pane scroll offset when the Pro toggle flips (the flip
+  // remounts this component - see parkedContentScroll above). The ref only
+  // exists in the desktop layout, which is also the only place the remount
+  // can happen - on mobile `el` stays null and nothing is parked.
+  const contentScrollRef = useRef<HTMLDivElement | null>(null);
+  const prevProInterface = useRef(proInterface);
+  useEffect(() => {
+    if (prevProInterface.current === proInterface) return;
+    prevProInterface.current = proInterface;
+    const el = contentScrollRef.current;
+    if (!el) return;
+    parkedContentScroll = { tab: activeTab, top: el.scrollTop, ts: Date.now() };
+    try { sessionStorage.setItem(SCROLL_RESTORE_KEY, JSON.stringify(parkedContentScroll)); } catch { /* ignore */ }
+  }, [proInterface, activeTab]);
+  // Restore when the container mounts. A callback ref rather than a mount
+  // effect: after the Pro-off reload this component first renders without the
+  // container (auth check pending), so a mount-time effect would consume the
+  // parked offset before there is anything to scroll.
+  const attachContentScroll = useCallback((el: HTMLDivElement | null) => {
+    contentScrollRef.current = el;
+    if (!el) return;
+    let parked = parkedContentScroll;
+    parkedContentScroll = null;
+    try {
+      const raw = sessionStorage.getItem(SCROLL_RESTORE_KEY);
+      if (raw) {
+        sessionStorage.removeItem(SCROLL_RESTORE_KEY);
+        parked = parked ?? (JSON.parse(raw) as NonNullable<typeof parkedContentScroll>);
+      }
+    } catch { /* ignore */ }
+    if (parked && parked.tab === activeTab && Date.now() - parked.ts < 60_000) {
+      el.scrollTop = parked.top;
+    }
+  }, [activeTab]);
 
   if (!isAuthenticated) {
     return null;
@@ -1116,7 +989,7 @@ export function SettingsApp({ linkSegments }: SettingsAppProps = {}) {
         onDoubleClick={() => { setSettingsSidebarWidth(256); localStorage.setItem('settings-sidebar-width', '256'); }}
       />
 
-      <div className="flex-1 overflow-y-auto">
+      <div ref={attachContentScroll} className="flex-1 overflow-y-auto">
         <div className="max-w-3xl mx-auto px-6 py-6">
           {renderTabContent()}
         </div>

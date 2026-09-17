@@ -1,6 +1,6 @@
 {
   "name": "bulwark-webmail",
-  "version": "1.8.1",
+  "version": "1.9.2",
   "description": "Bulwark Webmail - a modern webmail client built for Stalwart Mail Server",
   "author": "Bulwark Webmail <bulwark@rbm.systems>",
   "license": "AGPL-3.0-only",
@@ -36,6 +36,8 @@
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
     "@tanstack/react-virtual": "^3.13.24",
     "@tiptap/extension-color": "^3.22.4",
     "@tiptap/extension-image": "^3.22.4",

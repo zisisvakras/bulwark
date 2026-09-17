@@ -155,6 +155,11 @@ export function FilePreviewModal({ name, onClose, onDownload, getFileContent }: 
   // (text/html, image/svg+xml, ...) in a new tab would execute it in-origin.
   const [canOpenInNewTab, setCanOpenInNewTab] = useState(false);
   const [emlContent, setEmlContent] = useState<ParsedEml | null>(null);
+  // The PDF blob itself, kept alongside its object URL: the pdf.js mobile
+  // viewer needs the bytes, because fetching the blob: URL is blocked by CSP
+  // connect-src (#871). The URL is still what the <iframe> and the
+  // open-in-new-tab fallback use.
+  const [pdfBlob, setPdfBlob] = useState<Blob | null>(null);
 
   // Decide whether to render the PDF in a plain <iframe> (desktop) or with the
   // pdf.js canvas viewer (mobile). navigator.pdfViewerEnabled is the standard
@@ -208,6 +213,7 @@ export function FilePreviewModal({ name, onClose, onDownload, getFileContent }: 
     setObjectUrl(null);
     setCanOpenInNewTab(false);
     setEmlContent(null);
+    setPdfBlob(null);
     setLoading(true);
     setError(false);
     setResolvedFileType(getFilePreviewKind(name));
@@ -253,6 +259,7 @@ export function FilePreviewModal({ name, onClose, onDownload, getFileContent }: 
           if (!cancelled) {
             setObjectUrl(revokeUrl);
             setCanOpenInNewTab(isMimeTypeSafeForInlinePreview(effectiveType));
+            if (previewType === "pdf") setPdfBlob(typedBlob);
           }
         }
       } catch {
@@ -285,7 +292,13 @@ export function FilePreviewModal({ name, onClose, onDownload, getFileContent }: 
 
   return (
     <div role="dialog" aria-label={name} className="fixed inset-0 z-50 flex flex-col bg-black/80" onClick={onClose}>
-      <div className="flex items-center justify-between px-4 py-3 bg-background/90 backdrop-blur border-b border-border" onClick={(e) => e.stopPropagation()}>
+      {/* The dialog is `fixed inset-0` under `viewport-fit=cover`, so in an
+          installed iOS PWA (no browser chrome above it) the header would sit
+          underneath the status bar and its buttons - including the close
+          button - became unreachable (#936). Pad the bar itself so its
+          background still bleeds behind the status bar / notch. The insets are
+          physical, so pl/pr (not ps/pe) is correct in RTL too. */}
+      <div className="flex items-center justify-between gap-2 pl-[calc(1rem+env(safe-area-inset-left))] pr-[calc(1rem+env(safe-area-inset-right))] pt-[calc(0.75rem+env(safe-area-inset-top))] pb-3 bg-background/90 backdrop-blur border-b border-border" onClick={(e) => e.stopPropagation()}>
         <h3 className="text-sm font-medium truncate">{name}</h3>
         <div className="flex items-center gap-2">
           {objectUrl && canOpenInNewTab && (
@@ -309,7 +322,7 @@ export function FilePreviewModal({ name, onClose, onDownload, getFileContent }: 
         </div>
       </div>
 
-      <div className="flex-1 flex items-center justify-center overflow-auto p-4">
+      <div className="flex-1 flex items-center justify-center overflow-auto p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pl-[calc(1rem+env(safe-area-inset-left))] pr-[calc(1rem+env(safe-area-inset-right))]">
         {loading && (
           <div className="flex flex-col items-center gap-2 text-muted-foreground">
             <Loader2 className="w-8 h-8 animate-spin" />
@@ -374,7 +387,7 @@ export function FilePreviewModal({ name, onClose, onDownload, getFileContent }: 
           />
         )}
 
-        {!loading && !error && fileType === "pdf" && objectUrl && !pdfInlineSupported && (
+        {!loading && !error && fileType === "pdf" && objectUrl && pdfBlob && !pdfInlineSupported && (
           // Mobile browsers can't show a PDF inline in an <iframe> (Android: a
           // blank frame / silent download; iOS: only the first page), so render
           // it with pdf.js (canvas) instead. The header's open-in-new-tab /
@@ -383,7 +396,7 @@ export function FilePreviewModal({ name, onClose, onDownload, getFileContent }: 
             className="w-full max-w-3xl h-full overflow-auto rounded-lg bg-neutral-200 dark:bg-neutral-800 p-2"
             onClick={(e) => e.stopPropagation()}
           >
-            <PdfMobileViewer url={objectUrl} />
+            <PdfMobileViewer url={objectUrl} blob={pdfBlob} />
           </div>
         )}
 

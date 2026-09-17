@@ -5,9 +5,8 @@ import { useRouter } from "@/i18n/navigation";
 import { useTranslations } from "next-intl";
 import { Plus } from "lucide-react";
 import {
-  startOfMonth, endOfMonth, startOfWeek, endOfWeek,
   addMonths, subMonths, addWeeks, subWeeks, addDays, subDays,
-  startOfDay, format, parseISO,
+  format, parseISO,
 } from "date-fns";
 import { useCalendarStore } from "@/stores/calendar-store";
 import { isCalendarViewMode } from "@/stores/calendar-store";
@@ -48,10 +47,15 @@ import { SidebarAppsModal } from "@/components/layout/sidebar-apps-modal";
 import { InlineAppView } from "@/components/layout/inline-app-view";
 import { useSidebarApps } from "@/hooks/use-sidebar-apps";
 import { useIsEmbedded } from "@/hooks/use-is-embedded";
+import { useIsFocusedProTab } from "@/hooks/use-pane-context";
 import { useProMultiAccountCalendars } from "@/hooks/use-pro-multi-account-calendars";
 import { ResizeHandle } from "@/components/layout/resize-handle";
 import { sanitizeOutgoingCalendarEventData } from "@/lib/calendar-event-normalization";
+import { buildRecurrenceOverridePatch } from "@/lib/recurrence-overrides";
+import { baseEventStoreId, isServerRecurrenceInstance } from "@/lib/recurrence-instances";
+import { getClientByLocalAccountId } from "@/stores/client-registry";
 import { getEventStartDate } from "@/lib/calendar-utils";
+import { displayNow } from "@/lib/timezone";
 import { useTaskStore } from "@/stores/task-store";
 import { useContactStore } from "@/stores/contact-store";
 import { cn } from "@/lib/utils";
@@ -66,10 +70,16 @@ import { sharedCalendarColorKey, pickUnusedCalendarColor } from "@/lib/shared-ca
 import { debug } from "@/lib/debug";
 import { consumePendingWebcal, hasPendingWebcal, subscribeToPendingWebcal } from "@/lib/protocol-handlers/session";
 import type { ParsedWebcal } from "@/lib/protocol-handlers/webcal";
-import { appPath, buildCalendarPath, parseCalendarPath } from "@/lib/deep-links";
-import { consumePendingDeepLink } from "@/lib/deep-link-handoff";
+import { appPath, buildCalendarPath, parseCalendarPath, type CalendarDeepLink } from "@/lib/deep-links";
+import { consumePendingDeepLinkEntry, subscribePendingDeepLink } from "@/lib/deep-link-handoff";
 import { useDeepLinkUrl } from "@/hooks/use-deep-link-url";
 import { useProInterfaceActive } from "@/components/pro/pro-interface-redirect";
+import { useCalendarLocale } from "@/hooks/use-calendar-locale";
+import {
+  computeScrollWindow, fixedScrollWindowState, freshScrollWindowState, growScrollWindow, normalizeScrollWindowState,
+  scrollWindowContains, type CalendarFocus, type ScrollViewMode, type ScrollWindowOptions,
+  type ScrollWindowState, type ScrollWindowViewProps,
+} from "@/lib/calendar-scroll-window";
 
 type PendingScopeAction =
   | { type: "edit"; event: CalendarEvent; updates: Partial<CalendarEvent>; sendScheduling?: boolean }
@@ -132,9 +142,18 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
     void fetchPrincipal();
   }, [accountEmails, fetchPrincipal]);
 
+  // The default ParticipantIdentity (draft-ietf-jmap-calendars §6) is the
+  // address new invitations are organised from, so it goes first: the event
+  // modal takes currentUserEmails[0] as organizer.
+  const participantIdentities = useCalendarStore((s) => s.participantIdentities);
   const currentUserEmails = useMemo(
-    () => collectUserCalendarAddresses(identities.map(id => id.email), accountEmails),
-    [identities, accountEmails]
+    () => collectUserCalendarAddresses(
+      participantIdentities.filter(i => i.isDefault).map(i => i.calendarAddress.replace(/^mailto:/i, '')),
+      participantIdentities.map(i => i.calendarAddress.replace(/^mailto:/i, '')),
+      identities.map(id => id.email),
+      accountEmails,
+    ),
+    [participantIdentities, identities, accountEmails]
   );
 
   const [showEventModal, setShowEventModal] = useState(false);
@@ -154,7 +173,7 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
   const [defaultModalDate, setDefaultModalDate] = useState<Date | undefined>();
   const [defaultModalEndDate, setDefaultModalEndDate] = useState<Date | undefined>();
   const [defaultModalAllDay, setDefaultModalAllDay] = useState(false);
-  const [miniMonth, setMiniMonth] = useState(new Date());
+  const [miniMonth, setMiniMonth] = useState(() => displayNow());
   const [pendingScopeAction, setPendingScopeAction] = useState<PendingScopeAction | null>(null);
   const [detailEvent, setDetailEvent] = useState<CalendarEvent | null>(null);
   const [detailAnchorRect, setDetailAnchorRect] = useState<DOMRect | null>(null);
@@ -330,42 +349,98 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
     }
   }, [showBirthdayCalendar]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Free scrolling (#759): every view keeps one window of days around the
+  // day the user navigated to (the "focus"). Reaching an edge of the view
+  // widens that side and the whole window is refetched. Grid clicks only
+  // change the selection; navigation moves the focus and, when that leaves
+  // the loaded window, starts a fresh window there.
+  const { weekStartsOn, getMonthGridDays } = useCalendarLocale();
+  const monthGridDaysRef = useRef(getMonthGridDays);
+  useEffect(() => {
+    monthGridDaysRef.current = getMonthGridDays;
+  }, [getMonthGridDays]);
+  const scrollWindowOptions = useMemo<ScrollWindowOptions>(
+    () => ({ weekStartsOn, monthGridDays: (date) => monthGridDaysRef.current(date) }),
+    [weekStartsOn],
+  );
+  const scrollMode: ScrollViewMode | null = normalizedViewMode === "tasks" ? null : normalizedViewMode;
+  const [focus, setFocus] = useState<CalendarFocus>(() => ({ date: selectedDate, nonce: 0 }));
+  const [visibleDate, setVisibleDate] = useState<Date | null>(null);
+  const [scrollWindowState, setScrollWindowState] = useState<ScrollWindowState>(
+    () => freshScrollWindowState(scrollMode ?? "month", selectedDate),
+  );
+  // With free scrolling off, every view shows exactly one period around the
+  // focus and the edges never widen it.
+  const calendarFreeScroll = useSettingsStore((s) => s.calendarFreeScroll);
+  const focusKey = format(focus.date, "yyyy-MM-dd");
+  const fixedWindowState = useMemo(
+    () => (scrollMode ? fixedScrollWindowState(scrollMode, parseISO(focusKey)) : null),
+    [scrollMode, focusKey],
+  );
+  const windowState = !scrollMode
+    ? null
+    : calendarFreeScroll
+      ? normalizeScrollWindowState(scrollWindowState, scrollMode, focus.date)
+      : fixedWindowState;
+  useEffect(() => {
+    if (windowState && windowState !== scrollWindowState) setScrollWindowState(windowState);
+  }, [windowState, scrollWindowState]);
+  const scrollWindow = useMemo(
+    () => windowState ? computeScrollWindow(windowState, scrollWindowOptions) : null,
+    [windowState, scrollWindowOptions],
+  );
+  const windowKey = windowState ? `${windowState.mode}:${windowState.anchorKey}` : "";
+
+  const jumpTo = useCallback((date: Date) => {
+    setSelectedDate(date);
+    setMiniMonth(date);
+    setVisibleDate(null);
+    setFocus((prev) => ({ date, nonce: prev.nonce + 1 }));
+    if (!scrollMode) return;
+    setScrollWindowState((prev) => {
+      const current = normalizeScrollWindowState(prev, scrollMode, date);
+      const loaded = computeScrollWindow(current, scrollWindowOptions);
+      return scrollWindowContains(loaded, scrollMode, date, scrollWindowOptions)
+        ? current
+        : freshScrollWindowState(scrollMode, date);
+    });
+  }, [setSelectedDate, scrollMode, scrollWindowOptions]);
+
+  const extendScrollWindow = useCallback((side: "before" | "after") => {
+    if (!scrollMode) return;
+    setScrollWindowState((prev) => growScrollWindow(normalizeScrollWindowState(prev, scrollMode, focus.date), side));
+  }, [scrollMode, focus.date]);
+  const extendWindowStart = useCallback(() => extendScrollWindow("before"), [extendScrollWindow]);
+  const extendWindowEnd = useCallback(() => extendScrollWindow("after"), [extendScrollWindow]);
+
+  // The views report the day they show as the user scrolls; the title and
+  // the mini calendar follow it, the selection does not.
+  const handleVisibleDateChange = useCallback((date: Date) => {
+    setVisibleDate(date);
+    setMiniMonth(date);
+  }, []);
+  useEffect(() => {
+    setVisibleDate(null);
+  }, [normalizedViewMode]);
+
+  const scrollViewProps: ScrollWindowViewProps = {
+    focus,
+    rangeStart: scrollWindow?.start ?? focus.date,
+    rangeEnd: scrollWindow?.end ?? focus.date,
+    windowKey,
+    onExtendStart: calendarFreeScroll && scrollWindow?.canExtendStart ? extendWindowStart : undefined,
+    onExtendEnd: calendarFreeScroll && scrollWindow?.canExtendEnd ? extendWindowEnd : undefined,
+    isLoading: isLoadingEvents,
+    onVisibleDateChange: handleVisibleDateChange,
+  };
+
   const dateRange = useMemo(() => {
-    const d = selectedDate;
-    switch (normalizedViewMode) {
-      case "month": {
-        const ms = startOfMonth(d);
-        const me = endOfMonth(d);
-        return {
-          start: format(startOfWeek(ms, { weekStartsOn: firstDayOfWeek }), "yyyy-MM-dd'T'00:00:00"),
-          end: format(endOfWeek(me, { weekStartsOn: firstDayOfWeek }), "yyyy-MM-dd'T'23:59:59"),
-        };
-      }
-      case "week": {
-        const ws = startOfWeek(d, { weekStartsOn: firstDayOfWeek });
-        return {
-          start: format(ws, "yyyy-MM-dd'T'00:00:00"),
-          end: format(addDays(ws, 6), "yyyy-MM-dd'T'23:59:59"),
-        };
-      }
-      case "day":
-        return {
-          start: format(d, "yyyy-MM-dd'T'00:00:00"),
-          end: format(d, "yyyy-MM-dd'T'23:59:59"),
-        };
-      case "agenda": {
-        // Agenda always starts from today at the earliest
-        const today = startOfDay(new Date());
-        const agendaStart = d >= today ? d : today;
-        return {
-          start: format(agendaStart, "yyyy-MM-dd'T'00:00:00"),
-          end: format(addDays(agendaStart, 30), "yyyy-MM-dd'T'23:59:59"),
-        };
-      }
-      case "tasks":
-        return null;
-    }
-  }, [selectedDate, normalizedViewMode, firstDayOfWeek]);
+    if (!scrollWindow) return null;
+    return {
+      start: format(scrollWindow.start, "yyyy-MM-dd'T'00:00:00"),
+      end: format(scrollWindow.end, "yyyy-MM-dd'T'23:59:59"),
+    };
+  }, [scrollWindow]);
 
   // Fetch tasks when tasks view is active or when tasks are shown on calendar grid
   useEffect(() => {
@@ -391,36 +466,37 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
   const fetchAllAccountsCalendarsFn = useCalendarStore((s) => s.fetchAllAccountsCalendars);
   const fetchAllAccountsEventsFn = useCalendarStore((s) => s.fetchAllAccountsEvents);
 
+  // The arrows step from what is on screen, which may have been scrolled
+  // away from the selected day.
   const navigatePrev = useCallback(() => {
+    const base = visibleDate ?? selectedDate;
     let next: Date;
     switch (normalizedViewMode) {
-      case "month": next = subMonths(selectedDate, 1); break;
-      case "week": next = subWeeks(selectedDate, 1); break;
-      case "day": next = subDays(selectedDate, 1); break;
-      case "agenda": next = subMonths(selectedDate, 1); break;
+      case "month": next = subMonths(base, 1); break;
+      case "week": next = subWeeks(base, 1); break;
+      case "day": next = subDays(base, 1); break;
+      case "agenda": next = subMonths(base, 1); break;
       case "tasks": return;
     }
-    setSelectedDate(next);
-    setMiniMonth(next);
-  }, [normalizedViewMode, selectedDate, setSelectedDate]);
+    jumpTo(next);
+  }, [normalizedViewMode, selectedDate, visibleDate, jumpTo]);
 
   const navigateNext = useCallback(() => {
+    const base = visibleDate ?? selectedDate;
     let next: Date;
     switch (normalizedViewMode) {
-      case "month": next = addMonths(selectedDate, 1); break;
-      case "week": next = addWeeks(selectedDate, 1); break;
-      case "day": next = addDays(selectedDate, 1); break;
-      case "agenda": next = addMonths(selectedDate, 1); break;
+      case "month": next = addMonths(base, 1); break;
+      case "week": next = addWeeks(base, 1); break;
+      case "day": next = addDays(base, 1); break;
+      case "agenda": next = addMonths(base, 1); break;
       case "tasks": return;
     }
-    setSelectedDate(next);
-    setMiniMonth(next);
-  }, [normalizedViewMode, selectedDate, setSelectedDate]);
+    jumpTo(next);
+  }, [normalizedViewMode, selectedDate, visibleDate, jumpTo]);
 
   const goToToday = useCallback(() => {
-    setSelectedDate(new Date());
-    setMiniMonth(new Date());
-  }, [setSelectedDate]);
+    jumpTo(displayNow());
+  }, [jumpTo]);
 
   // Swipe navigation handlers for mobile
   const handleTouchStart = useCallback((e: ReactTouchEvent) => {
@@ -430,8 +506,8 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
 
   const handleTouchEnd = useCallback((e: ReactTouchEvent) => {
     if (!touchStartRef.current || !isMobile) return;
-    // Week view has its own horizontal scroll, skip swipe navigation
-    if (normalizedViewMode === 'week') { touchStartRef.current = null; return; }
+    // Week and day views scroll sideways themselves, skip swipe navigation
+    if (normalizedViewMode === 'week' || normalizedViewMode === 'day') { touchStartRef.current = null; return; }
     const touch = e.changedTouches[0];
     const dx = touch.clientX - touchStartRef.current.x;
     const dy = touch.clientY - touchStartRef.current.y;
@@ -454,16 +530,19 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
   }, [isMobile, normalizedViewMode, navigatePrev, navigateNext]);
 
   const handleSelectDate = useCallback((date: Date) => {
-    setSelectedDate(date);
-    setMiniMonth(date);
-    // On mobile month view, tapping a date switches to day view
+    // On mobile month view, tapping a date switches to day view on that day.
     if (isMobile && normalizedViewMode === "month") {
+      jumpTo(date);
       setMobileReturnToMonth(true);
       setViewMode("day");
+    } else {
+      // A click in the grid selects the day without moving the view.
+      setSelectedDate(date);
+      setMiniMonth(date);
     }
     // Close the narrow-pane sidebar overlay after the user picks a date.
     setNarrowSidebarOpen(false);
-  }, [setSelectedDate, isMobile, normalizedViewMode, setViewMode]);
+  }, [setSelectedDate, jumpTo, isMobile, normalizedViewMode, setViewMode]);
 
   const navigateBackToMonth = useCallback(() => {
     setMobileReturnToMonth(false);
@@ -471,9 +550,8 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
   }, [setViewMode]);
 
   const handleMiniMonthChange = useCallback((date: Date) => {
-    setMiniMonth(date);
-    setSelectedDate(date);
-  }, [setSelectedDate]);
+    jumpTo(date);
+  }, [jumpTo]);
 
   const openCreateModal = useCallback((date?: Date, endDate?: Date, allDay?: boolean) => {
     setEditEvent(null);
@@ -590,52 +668,79 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
   // `/calendar/<view>/<date>` moves the grid; `/calendar/event/<id>` opens the
   // event's sidebar and parks the grid on the day it starts. Applied once the
   // JMAP session is up, then the URL becomes an output of the view (below).
-  const deepLinkHandledRef = useRef(false);
-  useEffect(() => {
-    if (deepLinkHandledRef.current) return;
-    if (!isAuthenticated || !client) return;
-
-    const segments = linkSegments ?? consumePendingDeepLink('calendar') ?? [];
-    const link = parseCalendarPath(segments, new URLSearchParams(window.location.search));
-    deepLinkHandledRef.current = true;
-    if (!link) return;
-
+  // Held in a ref so the live-delivery subscription (Pro shell) always calls
+  // the copy that closes over the current client and handlers.
+  const applyCalendarDeepLink = (link: CalendarDeepLink) => {
     if (link.kind === 'view') {
       setViewMode(link.view);
-      if (link.date) setSelectedDate(link.date);
+      if (link.date) jumpTo(link.date);
       return;
     }
 
+    // A hit from another login (global search) is fetched through that
+    // login's client - the active one can't see it (#847).
+    const reachingClient = (link.login ? getClientByLocalAccountId(link.login) : null) ?? client;
+    if (!reachingClient) return;
     void (async () => {
       try {
-        const event = await client.getCalendarEvent(link.id, link.accountId);
+        const event = await reachingClient.getCalendarEvent(link.id, link.accountId);
         if (!event) {
           toast.error(tDeepLink('event_not_found'));
           return;
         }
         const start = getEventStartDate(event);
-        if (start) setSelectedDate(start);
+        if (start) jumpTo(start);
         openEditModal(event);
       } catch (err) {
         debug.error('Failed to open calendar deep link:', err);
         toast.error(tDeepLink('event_not_found'));
       }
     })();
-  }, [isAuthenticated, client, linkSegments, setViewMode, setSelectedDate, openEditModal, tDeepLink]);
+  };
+  const applyCalendarDeepLinkRef = useRef(applyCalendarDeepLink);
+  applyCalendarDeepLinkRef.current = applyCalendarDeepLink;
 
-  // The permalink for what the calendar is currently showing. Suppressed in
-  // the Pro shell, where /pro owns the address bar.
+  const deepLinkHandledRef = useRef(false);
+  useEffect(() => {
+    if (deepLinkHandledRef.current) return;
+    if (!isAuthenticated || !client) return;
+
+    const entry = linkSegments ? { segments: linkSegments } : consumePendingDeepLinkEntry('calendar');
+    const segments = entry?.segments ?? [];
+    const link = parseCalendarPath(segments, new URLSearchParams(entry?.search ?? window.location.search));
+    deepLinkHandledRef.current = true;
+    if (!link) return;
+    applyCalendarDeepLinkRef.current(link);
+  }, [isAuthenticated, client, linkSegments]);
+
+  // Pro shell only: this surface stays mounted for the whole session, so links
+  // arriving after mount are delivered live instead of being parked forever.
+  // Embedded-only: during a cold-load redirect the standard instance renders
+  // briefly and must not steal the link parked for the Pro one.
+  useEffect(() => {
+    if (!isEmbedded) return;
+    return subscribePendingDeepLink('calendar', (segments, search) => {
+      const link = parseCalendarPath(segments, new URLSearchParams(search ?? window.location.search));
+      if (link) applyCalendarDeepLinkRef.current(link);
+    });
+  }, [isEmbedded]);
+
+  // The permalink for what the calendar is currently showing. In the Pro
+  // shell only the focused tab writes the address bar; the standard instance
+  // that renders while Pro takes over a route stays silent.
   const proInterfaceActive = useProInterfaceActive();
+  const isFocusedProTab = useIsFocusedProTab();
   const eventLinkId = showEventModal && editEvent ? editEvent.id : null;
+  const calendarLinkPath = appPath(buildCalendarPath({
+    view: normalizedViewMode,
+    date: selectedDate,
+    eventId: eventLinkId,
+    accountId: eventLinkId ? editEvent?.accountId : null,
+  }));
   useDeepLinkUrl(
-    isEmbedded || proInterfaceActive
-      ? null
-      : appPath(buildCalendarPath({
-          view: normalizedViewMode,
-          date: selectedDate,
-          eventId: eventLinkId,
-          accountId: eventLinkId ? editEvent?.accountId : null,
-        })),
+    isEmbedded
+      ? (isFocusedProTab ? calendarLinkPath : null)
+      : proInterfaceActive ? null : calendarLinkPath,
   );
 
   const handleEditFromDetail = useCallback(() => {
@@ -649,6 +754,27 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
   const findMasterEvent = useCallback(async (occurrence: CalendarEvent): Promise<CalendarEvent | null> => {
     if ((occurrence.recurrenceRules?.length ?? 0) > 0 && !occurrence.recurrenceId) {
       return occurrence;
+    }
+    // An occurrence expanded by the server names its base event outright.
+    // Fetch it through the occurrence's own account and hand it back under
+    // the store id the base would have, so the store routes mutations on it
+    // through the same account (see resolveMutationTarget).
+    if (isServerRecurrenceInstance(occurrence) && occurrence.baseEventId) {
+      const accountClient = (occurrence.localAccountId && getClientByLocalAccountId(occurrence.localAccountId)) || client;
+      if (!accountClient) return null;
+      const master = await accountClient.getCalendarEvent(occurrence.baseEventId, occurrence.accountId);
+      if (!master) return null;
+      return {
+        ...master,
+        id: baseEventStoreId(occurrence) ?? master.id,
+        originalId: master.id,
+        originalCalendarIds: master.calendarIds,
+        calendarIds: occurrence.calendarIds,
+        accountId: occurrence.accountId,
+        accountName: occurrence.accountName,
+        localAccountId: occurrence.localAccountId,
+        isShared: occurrence.isShared,
+      };
     }
     const master = events.find(e =>
       e.uid === occurrence.uid && !e.recurrenceId && (e.recurrenceRules?.length ?? 0) > 0
@@ -677,7 +803,7 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
 
   // Intercept browser refresh gestures (F5, Ctrl/Cmd+R, pull-to-refresh)
   // and refresh calendar data via JMAP instead of reloading the page.
-  useRefreshGesture({
+  const { indicator: refreshIndicator } = useRefreshGesture({
     enabled: isAuthenticated && !!client,
     onRefresh: async () => {
       if (!client) return;
@@ -706,9 +832,8 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
       return;
     }
 
-    setSelectedDate(eventDate);
-    setMiniMonth(eventDate);
-  }, [setSelectedDate]);
+    jumpTo(eventDate);
+  }, [jumpTo]);
 
   const handleSaveEvent = useCallback(async (data: Partial<CalendarEvent>, sendSchedulingMessages?: boolean) => {
     if (!client) { toast.error(t("notifications.event_error")); return; }
@@ -822,16 +947,18 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
       if (type === "edit" && updates) {
         switch (scope) {
           case "this": {
-            // Synthetic IDs (from expandRecurrences) can't be updated directly.
-            // Patch the master event's recurrenceOverrides instead.
+            if (isServerRecurrenceInstance(event)) {
+              // A server-expanded occurrence is written through its own
+              // (synthetic) id; the store handles the older-server fallback.
+              await updateEvent(client, event.id, updates, sendScheduling);
+              break;
+            }
+            // Client-side expanded occurrence: patch the master event's
+            // recurrenceOverrides instead.
             const master = await findMasterEvent(event);
             if (master && event.recurrenceId) {
-              const patchUpdates: Record<string, unknown> = {};
-              for (const [key, value] of Object.entries(updates)) {
-                if (['id', 'uid', '@type', 'calendarIds', 'recurrenceRules', 'recurrenceOverrides', 'excludedRecurrenceRules'].includes(key)) continue;
-                patchUpdates[`recurrenceOverrides/${event.recurrenceId}/${key}`] = value;
-              }
-              await updateEvent(client, master.id, patchUpdates as Partial<CalendarEvent>, sendScheduling);
+              const patchUpdates = buildRecurrenceOverridePatch(updates, event.recurrenceId);
+              await updateEvent(client, master.id, patchUpdates, sendScheduling);
             } else {
               await updateEvent(client, event.id, updates, sendScheduling);
             }
@@ -895,8 +1022,12 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
       } else {
         switch (scope) {
           case "this": {
-            // Synthetic IDs (from expandRecurrences) can't be destroyed directly.
-            // Exclude the instance via recurrenceOverrides on the master event.
+            if (isServerRecurrenceInstance(event)) {
+              await deleteEvent(client, event.id, sendScheduling);
+              break;
+            }
+            // Client-side expanded occurrence: exclude the instance via
+            // recurrenceOverrides on the master event.
             const delMaster = await findMasterEvent(event);
             if (delMaster && event.recurrenceId) {
               await updateEvent(
@@ -993,7 +1124,7 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
 
   const handleSaveNoteFromDetail = useCallback(async (note: string) => {
     if (!detailEvent || !client) return;
-    const timestamp = format(new Date(), "yyyy-MM-dd HH:mm");
+    const timestamp = format(displayNow(), "yyyy-MM-dd HH:mm");
     const separator = `\n\n--- ${timestamp} ---\n`;
     const newDescription = detailEvent.description
       ? `${detailEvent.description}${separator}${note}`
@@ -1261,6 +1392,7 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
         case "month":
           return (
             <CalendarMonthView
+              {...scrollViewProps}
               selectedDate={selectedDate}
               events={visibleEvents}
               calendars={allCalendars}
@@ -1279,6 +1411,7 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
         case "week":
           return (
             <CalendarWeekView
+              {...scrollViewProps}
               selectedDate={selectedDate}
               events={visibleEvents}
               calendars={allCalendars}
@@ -1300,6 +1433,7 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
         case "day":
           return (
             <CalendarDayView
+              {...scrollViewProps}
               selectedDate={selectedDate}
               events={visibleEvents}
               calendars={allCalendars}
@@ -1319,7 +1453,7 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
         case "agenda":
           return (
             <CalendarAgendaView
-              selectedDate={selectedDate}
+              {...scrollViewProps}
               events={visibleEvents}
               calendars={allCalendars}
               onSelectEvent={handleSelectEvent}
@@ -1374,6 +1508,7 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
   return (
     <div className={cn("flex flex-col bg-background overflow-hidden pt-[env(safe-area-inset-top)]", isEmbedded ? "h-full" : "h-dvh")}>
       <AppTopBannerSlot />
+      {refreshIndicator}
       <div className={cn("relative flex flex-1 min-h-0 overflow-hidden", isMobile && "flex-col")}>
       {/* Left Navigation Rail (hidden when embedded in Pro shell) */}
       {!isMobile && !isEmbedded && (
@@ -1470,8 +1605,9 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
                 try {
                   const count = await clearCalendarEvents(client, cal.id);
                   toast.success(tMgmt("events_cleared", { count }));
-                } catch {
-                  toast.error(tMgmt("error_clear"));
+                } catch (err) {
+                  // The store rethrows the server's reason (#434).
+                  toast.error(err instanceof Error && err.message ? err.message : tMgmt("error_clear"));
                 }
               } : undefined}
               onDeleteCalendar={client ? async (cal: Calendar) => {
@@ -1514,6 +1650,7 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
       <div className="flex flex-col flex-1 min-w-0 min-h-0">
         <CalendarToolbar
           selectedDate={selectedDate}
+          visibleDate={visibleDate}
           viewMode={normalizedViewMode}
           onPrev={navigatePrev}
           onNext={navigateNext}
@@ -1642,11 +1779,16 @@ export function CalendarApp({ linkSegments }: CalendarAppProps = {}) {
               const d = new Date(date);
               if (typeof hour === "number") {
                 d.setHours(hour, 0, 0, 0);
+                // Explicit end so the modal keeps the clicked hour instead of
+                // applying its next-hour fallback for date-only defaults (#435).
+                const end = new Date(date);
+                end.setHours(hour + 1, 0, 0, 0);
+                openCreateModal(d, end);
               } else {
-                const now = new Date();
+                const now = displayNow();
                 d.setHours(now.getHours() + 1, 0, 0, 0);
+                openCreateModal(d);
               }
-              openCreateModal(d);
             }}
             onNewAllDayEvent={() => {
               const d = new Date(date);

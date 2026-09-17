@@ -4,13 +4,17 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useTranslations, useLocale } from "next-intl";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { LinkifiedText } from "@/components/ui/linkified-text";
 import { X, Trash2, Check, Users, CalendarDays, Copy, Pencil, Clock, MapPin, Video, Repeat, Bell, AlignLeft, Plus } from "lucide-react";
 import { format, parseISO, addHours, addDays, isSameDay } from "date-fns";
 import type { CalendarEvent, Calendar, CalendarParticipant, CalendarEventAlert, CalendarRecurrenceRule } from "@/lib/jmap/types";
 import { RecurrenceEditor, buildRecurrenceSummary, isSimpleRecurrenceRule } from "./recurrence-editor";
 import { parseDuration, getEventColor } from "./event-card";
 import { buildAllDayDuration, getEventDisplayEndDate, getEventEndDate, getEventStartDate, getPrimaryCalendarId } from "@/lib/calendar-utils";
+import { displayNow, getEffectiveTimeZone } from "@/lib/timezone";
+import { createRecurrenceRule } from "@/lib/recurrence-rule";
 import { ParticipantInput, type ParticipantInputHandle } from "./participant-input";
+import { ParticipantAvailability } from "./participant-availability";
 import {
   isOrganizer,
   getUserParticipantId,
@@ -24,6 +28,7 @@ import { PluginSlot } from "@/components/plugins/plugin-slot";
 import { useSettingsStore } from "@/stores/settings-store";
 import { generateUUID } from "@/lib/utils";
 import { useFormatEventDate } from "@/hooks/use-format-event-date";
+import { useIsPaneScoped } from "@/hooks/use-pane-context";
 import { calendarHooks } from "@/lib/plugin-hooks";
 import type { ConflictWarning } from "@/lib/plugin-types";
 
@@ -51,6 +56,19 @@ interface EventModalProps {
   currentUserEmails?: string[];
   isSubscriptionCalendar?: (calendarId: string) => boolean;
   isMobile?: boolean;
+}
+
+/**
+ * When an event's start is edited, the end moves with it to keep the SAME
+ * duration (oldEnd - oldStart), so the appointment's length is preserved.
+ * Returns the new end, or null for invalid or already-negative-duration input.
+ * Pure, for testing.
+ */
+export function shiftedEnd(oldStart: Date, oldEnd: Date, newStart: Date): Date | null {
+  if (isNaN(oldStart.getTime()) || isNaN(oldEnd.getTime()) || isNaN(newStart.getTime())) return null;
+  const durationMs = oldEnd.getTime() - oldStart.getTime();
+  if (durationMs < 0) return null;
+  return new Date(newStart.getTime() + durationMs);
 }
 
 function formatDateInput(d: Date): string {
@@ -186,6 +204,14 @@ export function EventModal({
   const locale = useLocale();
   const timeFormat = useSettingsStore((s) => s.timeFormat);
   const timeDisplayFmt = timeFormat === "12h" ? "h:mm a" : "HH:mm";
+  // Inside a Pro pane the "mobile" layout must cover the pane, not the
+  // viewport - a `fixed inset-0` editor from a split pane would take over
+  // the whole app. The absolute variant anchors to the pane's tab-body
+  // wrapper (the nearest positioned ancestor), covering exactly the pane.
+  const isPaneScoped = useIsPaneScoped();
+  const mobileRootClass = isPaneScoped
+    ? "absolute inset-0 z-40 flex flex-col bg-background"
+    : "fixed inset-0 z-50 flex flex-col bg-background";
   const isEdit = !!event;
   const formatEventDate = useFormatEventDate();
   const [mode, setMode] = useState<"view" | "edit">(isEdit ? "view" : "edit");
@@ -235,11 +261,11 @@ export function EventModal({
     if (defaultDate) {
       const d = new Date(defaultDate);
       if (defaultEndDate) return d;
-      const now = new Date();
+      const now = displayNow();
       d.setHours(now.getHours() + 1, 0, 0, 0);
       return d;
     }
-    const d = new Date();
+    const d = displayNow();
     d.setHours(d.getHours() + 1, 0, 0, 0);
     return d;
   };
@@ -268,6 +294,21 @@ export function EventModal({
   const [endDate, setEndDate] = useState(formatDateInput(getInitialEnd()));
   const [endTime, setEndTime] = useState(formatTimeInput(getInitialEnd()));
   const [allDay, setAllDay] = useState(event?.showWithoutTime || defaultAllDay || false);
+
+  // Editing the start shifts the end with it, preserving the event's current
+  // length (end - start) - so moving the start never leaves the end before it
+  // and never silently changes the duration.
+  const shiftEndKeepingDuration = (nextStartDate: string, nextStartTime: string) => {
+    const oldStart = new Date(`${startDate}T${allDay ? "00:00" : (startTime || "00:00")}:00`);
+    const oldEnd = new Date(`${endDate}T${allDay ? "00:00" : (endTime || "00:00")}:00`);
+    const newStart = new Date(`${nextStartDate}T${allDay ? "00:00" : (nextStartTime || "00:00")}:00`);
+    const nextEnd = shiftedEnd(oldStart, oldEnd, newStart);
+    if (!nextEnd) return;
+    setEndDate(formatDateInput(nextEnd));
+    if (!allDay) setEndTime(formatTimeInput(nextEnd));
+  };
+  const handleStartDateChange = (v: string) => { setStartDate(v); shiftEndKeepingDuration(v, startTime); };
+  const handleStartTimeChange = (v: string) => { setStartTime(v); shiftEndKeepingDuration(startDate, v); };
   const [calendarId, setCalendarId] = useState<string>(() => {
     if (event?.calendarIds) return getPrimaryCalendarId(event) || calendars[0]?.id || "";
     if (defaultCalendarId && calendars.some(c => c.id === defaultCalendarId)) return defaultCalendarId;
@@ -370,6 +411,19 @@ export function EventModal({
   const [sendInvitations, setSendInvitations] = useState(true);
   const participantInputRef = useRef<ParticipantInputHandle>(null);
 
+  // The event window the attendees' free/busy is checked against. Parsed in
+  // local time like the save path; an all-day event spans its whole days.
+  const availabilityWindow = useMemo(() => {
+    const startStr = allDay ? `${startDate}T00:00:00` : `${startDate}T${startTime || "00:00"}:00`;
+    const endStr = allDay ? `${endDate}T23:59:59` : `${endDate}T${endTime || "00:00"}:00`;
+    const start = startDate ? new Date(startStr) : null;
+    const end = endDate ? new Date(endStr) : null;
+    return {
+      start: start && !Number.isNaN(start.getTime()) ? start : null,
+      end: end && !Number.isNaN(end.getTime()) ? end : null,
+    };
+  }, [startDate, startTime, endDate, endTime, allDay]);
+
   // Plugin transform: collect conflict warnings for the current event form.
   // Re-runs (debounced) whenever fields that affect scheduling change.
   const [pluginConflictWarnings, setPluginConflictWarnings] = useState<ConflictWarning[]>([]);
@@ -450,7 +504,9 @@ export function EventModal({
       duration = buildDuration(start, end);
     }
 
-    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    // The form's wall-clock fields are in the user's effective zone (the
+    // grid and prefill are display dates), so label them with that zone.
+    const timeZone = getEffectiveTimeZone();
 
     const data: Partial<CalendarEvent> = {
       title: trimmedTitle,
@@ -503,25 +559,7 @@ export function EventModal({
     if (recurrence === "custom" && customRule) {
       data.recurrenceRules = [customRule];
     } else if (recurrence !== "none" && recurrence !== "custom") {
-      data.recurrenceRules = [{
-        "@type": "RecurrenceRule",
-        frequency: recurrence,
-        interval: 1,
-        rscale: "gregorian",
-        skip: "omit",
-        firstDayOfWeek: "mo",
-        byDay: null,
-        byMonthDay: null,
-        byMonth: null,
-        byYearDay: null,
-        byWeekNo: null,
-        byHour: null,
-        byMinute: null,
-        bySecond: null,
-        bySetPosition: null,
-        count: null,
-        until: null,
-      }];
+      data.recurrenceRules = [createRecurrenceRule(recurrence)];
     } else if (event && event.recurrenceRules?.length) {
       data.recurrenceRules = null;
       if (event.recurrenceOverrides) data.recurrenceOverrides = null;
@@ -662,7 +700,7 @@ export function EventModal({
     const participants = getParticipantList(event);
 
     return (
-      <div ref={modalRef} role="dialog" aria-modal={isMobile || undefined} aria-label={event.title || t("events.no_title")} className={isMobile ? "fixed inset-0 z-50 flex flex-col bg-background" : "flex flex-col h-full bg-background"}>
+      <div ref={modalRef} role="dialog" aria-modal={isMobile || undefined} aria-label={event.title || t("events.no_title")} className={isMobile ? mobileRootClass : "flex flex-col h-full bg-background"}>
         <div className="flex items-center justify-between px-6 py-4 border-b border-border flex-shrink-0">
           <h2 className="text-lg font-semibold truncate">{event.title || t("events.no_title")}</h2>
           <button onClick={onClose} className="p-1.5 rounded-md hover:bg-muted transition-colors duration-150 text-muted-foreground hover:text-foreground" aria-label={t("form.cancel")}>
@@ -722,7 +760,9 @@ export function EventModal({
             })()}
 
             {event.description && (
-              <p className="text-sm text-muted-foreground">{event.description}</p>
+              <p className="text-sm text-muted-foreground whitespace-pre-line break-words">
+                <LinkifiedText text={event.description} />
+              </p>
             )}
 
             {locationName && (
@@ -806,7 +846,7 @@ export function EventModal({
     const color = getEventColor(event, eventCalendar);
 
     return (
-      <div ref={modalRef} role="dialog" aria-modal={isMobile || undefined} aria-label={event.title || t("events.no_title")} className={isMobile ? "fixed inset-0 z-50 flex flex-col bg-background" : "flex flex-col h-full bg-background"}>
+      <div ref={modalRef} role="dialog" aria-modal={isMobile || undefined} aria-label={event.title || t("events.no_title")} className={isMobile ? mobileRootClass : "flex flex-col h-full bg-background"}>
         {/* Color accent bar */}
         <div className="h-1 w-full flex-shrink-0" style={{ backgroundColor: color }} />
 
@@ -954,7 +994,9 @@ export function EventModal({
             {event.description && (
               <div className="flex items-start gap-2.5">
                 <AlignLeft className="w-4 h-4 text-muted-foreground mt-0.5 flex-shrink-0" />
-                <p className="text-sm text-muted-foreground whitespace-pre-line">{event.description}</p>
+                <p className="text-sm text-muted-foreground whitespace-pre-line break-words">
+                  <LinkifiedText text={event.description} />
+                </p>
               </div>
             )}
           </div>
@@ -1000,7 +1042,7 @@ export function EventModal({
   }
 
   return (
-    <div ref={modalRef} role="dialog" aria-modal={isMobile || undefined} aria-label={isEdit ? t("events.edit") : t("events.create")} data-tour="event-modal" className={isMobile ? "fixed inset-0 z-50 flex flex-col bg-background" : "flex flex-col h-full bg-background"}>
+    <div ref={modalRef} role="dialog" aria-modal={isMobile || undefined} aria-label={isEdit ? t("events.edit") : t("events.create")} data-tour="event-modal" className={isMobile ? mobileRootClass : "flex flex-col h-full bg-background"}>
       <div className="flex items-center justify-between px-6 py-4 border-b border-border flex-shrink-0">
         <h2 className="text-lg font-semibold">
           {isEdit ? t("events.edit") : t("events.create")}
@@ -1091,6 +1133,11 @@ export function EventModal({
               onAdd={handleAddAttendee}
               onRemove={handleRemoveAttendee}
             />
+            <ParticipantAvailability
+              attendees={attendees}
+              start={availabilityWindow.start}
+              end={availabilityWindow.end}
+            />
             {isEdit && statusCounts && (existingParticipants.length > 0) && (
               <p className="text-xs text-muted-foreground mt-1.5">
                 {t("participants.status_summary", {
@@ -1118,7 +1165,7 @@ export function EventModal({
               <input
                 type="date"
                 value={startDate}
-                onChange={(e) => setStartDate(e.target.value)}
+                onChange={(e) => handleStartDateChange(e.target.value)}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
               />
             </div>
@@ -1128,7 +1175,7 @@ export function EventModal({
                 <input
                   type="time"
                   value={startTime}
-                  onChange={(e) => setStartTime(e.target.value)}
+                  onChange={(e) => handleStartTimeChange(e.target.value)}
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                 />
               </div>
@@ -1233,7 +1280,7 @@ export function EventModal({
                 rule={customRule}
                 eventStart={(() => {
                   const d = new Date(`${startDate}T${allDay ? "00:00" : (startTime || "00:00")}:00`);
-                  return isNaN(d.getTime()) ? new Date() : d;
+                  return isNaN(d.getTime()) ? displayNow() : d;
                 })()}
                 onSave={handleRecurrenceEditorSave}
                 onCancel={handleRecurrenceEditorCancel}
@@ -1320,11 +1367,11 @@ export function EventModal({
         </div>
       </div>
 
-      <div className="flex items-center justify-between px-6 py-4 border-t border-border flex-shrink-0">
-        <div className="flex items-center gap-1">
+      <div className="flex items-center justify-between px-6 py-4 border-t border-border flex-shrink-0 flex-wrap gap-y-2">
+        <div className="flex items-center gap-1 w-full">
           {isEdit && onDelete && (
             showDeleteConfirm ? (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <div>
                   <span className="text-sm text-red-600 dark:text-red-400">
                     {t("form.delete_confirm")}
@@ -1339,11 +1386,16 @@ export function EventModal({
                   variant="outline"
                   size="sm"
                   onClick={() => { onDelete(event!.id, hasParticipants || undefined); onClose(); }}
-                  className="text-red-600 dark:text-red-400 border-red-300 dark:border-red-700"
+                  className="text-red-600 dark:text-red-400 border-red-300 dark:border-red-700 w-full"
                 >
                   {t("events.delete")}
                 </Button>
-                <Button variant="ghost" size="sm" onClick={() => setShowDeleteConfirm(false)}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowDeleteConfirm(false)}
+                  className="w-full"
+                >
                   {t("form.cancel")}
                 </Button>
               </div>
@@ -1352,7 +1404,7 @@ export function EventModal({
                 variant="ghost"
                 size="sm"
                 onClick={() => setShowDeleteConfirm(true)}
-                className="text-red-600 dark:text-red-400"
+                className="text-red-600 dark:text-red-400 w-full"
               >
                 <Trash2 className="w-4 h-4 me-1" />
                 {t("events.delete")}
@@ -1365,6 +1417,7 @@ export function EventModal({
               size="sm"
               onClick={handleDuplicate}
               aria-label={t("events.duplicate")}
+              className="w-full"
             >
               <Copy className="w-4 h-4 me-1" />
               {t("events.duplicate")}
@@ -1372,14 +1425,24 @@ export function EventModal({
           )}
         </div>
 
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={isEdit ? () => setMode("view") : onClose}>
+        {!showDeleteConfirm && (
+        <div className="flex gap-2 w-full">
+          <Button
+            variant="outline"
+            onClick={isEdit ? () => setMode("view") : onClose}
+            className="w-full"
+          >
             {t("form.cancel")}
           </Button>
-          <Button onClick={handleSave} disabled={!title.trim() || isSaving}>
+          <Button
+            onClick={handleSave}
+            disabled={!title.trim() || isSaving}
+            className="w-full"
+          >
             {t("form.save")}
           </Button>
         </div>
+        )}
       </div>
     </div>
   );

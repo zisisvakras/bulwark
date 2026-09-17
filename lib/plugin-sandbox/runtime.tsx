@@ -29,7 +29,7 @@ import type {
 } from './protocol';
 import { themeSnapshotToCSS, type ThemeSnapshot } from './host-theme';
 import type { SlotName } from '../plugin-types';
-import { ContactCard } from '../jmap/types';
+import { AddressBook, ContactCard } from '../jmap/types';
 import { EncryptionAtRestConfig, PublicKeyInput } from '@/stores/account-security-store';
 
 // ─── Module-scope state ──────────────────────────────────────
@@ -194,7 +194,9 @@ function buildPluginApi(manifest: PluginManifest) {
       removePublicKey: (keyId: string) => callApi('crypto.removePublicKey', [keyId]),
       setEncryptionAtRest: (config: EncryptionAtRestConfig) => callApi('crypto.setEncryptionAtRest', [config]),
       getEncryptionAtRest: () => callApi('crypto.getEncryptionAtRest', []),
-      getOrCreateWebAuthn: (masterCredentialIdBytes?: number[], name?: string, displayName?: string) => callApi('crypto.getOrCreateWebAuthn', [masterCredentialIdBytes, manifest.id, name, displayName], 0)
+      getWebAuthn: (masterCredentialIdBytes: number[]) => callApi('crypto.getWebAuthn', [masterCredentialIdBytes, manifest.id], 0),
+      createWebAuthn: (name: string, displayName: string) => callApi('crypto.createWebAuthn', [manifest.id, name, displayName], 0),
+      getPublicKeyFromWKD: (email: string) => callApi('crypto.getPublicKeyFromWKD', [email]),
     },
     storage: {
       get: (key: string) => callApi('storage.get', [key]),
@@ -253,7 +255,7 @@ function buildPluginApi(manifest: PluginManifest) {
       removeKeyword: (emailId: string, keyword: string, accountId?: string) =>
         callApi('jmap.removeKeyword', [emailId, keyword, accountId]) as Promise<void>,
       /** Fetch a blob's raw bytes by id. Resolves to a Uint8Array. */
-      fetchBlob: (blobId: string, opts?: { name?: string; type?: string }) =>
+      fetchBlob: (blobId: string, opts?: { name?: string; type?: string, rangeHeader?: number }) =>
         callApi('jmap.fetchBlob', [blobId, opts]) as Promise<Uint8Array>,
       uploadBlob: (content: Uint8Array, name: string, type: string) =>
         callApi('jmap.uploadBlob', [content, name, type]) as Promise<{ blobId: string; size: number; type: string; }>,
@@ -277,10 +279,16 @@ function buildPluginApi(manifest: PluginManifest) {
       ) => callApi('jmap.importRaw', [rawBytes, mailboxRoles, opts]),
     },
     contacts: {
-      get: (contactId: string) => callApi('contact.get', [contactId]) as Promise<ContactCard>,
-      update: (contactId: string, updates: Partial<ContactCard>) => callApi('contact.update', [contactId, updates]),
-      create: (contact: ContactCard) => callApi('contact.create', [contact]) as Promise<string>,
+      get: (contactId: string) => callApi('contact.get', [contactId]) as Promise<ContactCard | null>,
+      update: (contactId: string, updates: Partial<ContactCard>) => callApi('contact.update', [contactId, updates]) as Promise<void>,
+      create: (contact: ContactCard) => callApi('contact.create', [contact]) as Promise<ContactCard>,
       search: (query: string) => callApi('contact.search', [query]) as Promise<ContactCard[]>,
+      list: (addressBookId?: string) => callApi('contact.list', [addressBookId]) as Promise<ContactCard[]>,
+      remove: (contactId: string) => callApi('contact.delete', [contactId]) as Promise<void>,
+    },
+    addressBooks: {
+      list: () => callApi('addressbook.list', []) as Promise<AddressBook[]>,
+      create: (name: string) => callApi('addressbook.create', [name]) as Promise<AddressBook>,
     },
     /**
      * Used to alterate files before they are uploaded to server.
@@ -319,6 +327,17 @@ function buildPluginApi(manifest: PluginManifest) {
         cancelLabel?: string;
         fields?: Array<{ name: string; label: string; type?: 'text' | 'password'; placeholder?: string; required?: boolean }>;
       }) => callApi('ui.prompt', [opts], 0) as Promise<Record<string, string> | null>,
+      /** Opens one of this plugin's OWN slots (see the 'plugin-dialog'
+       *  SlotName) inside a real, app-root, full-size dialog - unlike every
+       *  other slot, which renders wherever it's placed in the page and is
+       *  constrained by that spot's own layout. Use this for anything that
+       *  needs to be a large, genuinely clickable custom UI (a file browser,
+       *  a multi-step form, etc.) rather than a toolbar/row-sized control.
+       *  Resolves to whatever value the slot component passes to its
+       *  `onResult` prop, or null if the user closes the dialog without
+       *  calling it. No timeout - it waits for the user. */
+      openDialog: (opts: { title?: string; slot: string; extraProps?: Record<string, unknown>; width?: number }) =>
+        callApi('ui.openDialog', [opts], 0) as Promise<unknown>,
       /** Re-runs the onRenderEmailBody hook for the open message (e.g. after a
        *  crypto plugin unlocks a key) so its body re-renders without a reload. */
       rerenderEmail: () => callApi('ui.rerenderEmail', []) as Promise<void>,
@@ -340,8 +359,8 @@ function buildPluginApi(manifest: PluginManifest) {
     },
     // Native sidebar tag definitions. Definition reads/writes use the existing
     // settings permissions; server discovery and message counts use email:read.
-    // add() is intentionally append-only: it never overwrites or removes tags
-    // the user has already named, coloured, hidden, or reordered.
+    // add() is intentionally append-only. reorder() requires a complete
+    // permutation of existing ids. Neither method overwrites or removes tags.
     keywords: {
       list: () => callApi('keywords.list', []) as Promise<PluginKeywordDefinition[]>,
       add: (definitions: PluginKeywordDefinitionInput[]) =>
@@ -349,6 +368,8 @@ function buildPluginApi(manifest: PluginManifest) {
           added: PluginKeywordDefinition[];
           skipped: string[];
         }>,
+      reorder: (ids: string[], options?: { caseSensitive?: boolean }) =>
+        callApi('keywords.reorder', [ids, options]) as Promise<PluginKeywordDefinition[]>,
       discover: (options?: { limit?: number }) =>
         callApi('keywords.discover', [options]) as Promise<{
           keywords: Record<string, number>;

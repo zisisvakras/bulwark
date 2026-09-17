@@ -427,6 +427,15 @@ export const authHooks = {
   onAccountRemove: new HookBus(),
   onTokenRefresh: new HookBus(),
   onAuthReady: new HookBus(),
+  /**
+   * Fired when a third-party OAuth provider redirects back to the generic
+   * plugin OAuth callback page (`/[locale]/plugins/oauth/callback`). The
+   * payload is `{ code, state, receivedAt }` exactly as the provider sent it.
+   * Each plugin validates `state` against the verifier it stashed before
+   * redirecting, so plugins that did not initiate a flow simply ignore the
+   * event. See `components/providers/plugin-oauth-callback-listener.tsx`.
+   */
+  onOAuthCallback: new HookBus(),
 };
 
 // §7.6 Settings Hooks
@@ -638,6 +647,14 @@ export const renderHooks = {
   // HTML through its sanitizer — plugin output is not trusted blindly. This is
   // the render-takeover hook used by the S/MIME plugin to replace the former
   // native detect/decrypt/verify path in the viewer.
+  //
+  // The host also enforces the user's external-content preference on the
+  // returned HTML: images, media, backgrounds and CSS url() pointing at remote
+  // hosts are neutralised (and the "external content blocked" banner shown)
+  // whenever the setting says block/ask, exactly as for a non-encrypted body.
+  // A handler cannot opt out of this — a decrypted newsletter must not leak a
+  // read receipt the user asked to suppress (#797) — so plugins do NOT need to
+  // reimplement the check themselves.
   onRenderEmailBody: new HookBus(),
 };
 

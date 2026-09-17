@@ -2,6 +2,7 @@
 
 import { Email, ThreadGroup } from "@/lib/jmap/types";
 import { ThreadListItem } from "./thread-list-item";
+import type { Attachment } from "@/lib/jmap/types";
 import { EmailContextMenu } from "./email-context-menu";
 import { cn } from "@/lib/utils";
 import { Trash2, Mail, MailX, MailOpen, Loader2, SearchX, AlertTriangle, CalendarClock, ShieldCheck } from "lucide-react";
@@ -44,6 +45,7 @@ interface EmailListProps {
   onMoveToMailbox?: (emailId: string, mailboxId: string) => void;
   onMarkAsSpam?: (email: Email) => void;
   onUndoSpam?: (email: Email) => void;
+  onOpenAttachment?: (email: Email, attachment: Attachment) => void;
   onEditDraft?: (email: Email) => void;
   isScheduledView?: boolean;
   onLoadMoreScheduled?: () => void;
@@ -73,6 +75,7 @@ export function EmailList({
   onSetTag,
   onMarkAsSpam,
   onUndoSpam,
+  onOpenAttachment,
   onMoveToMailbox,
   onEditDraft,
   isScheduledView = false,
@@ -126,11 +129,17 @@ export function EmailList({
     ?? (isUnifiedView ? (unifiedRole ?? undefined) : undefined);
 
   const disableThreading = useSettingsStore((state) => state.disableThreading);
+  // The order the current folder view was fetched in (#718), so thread
+  // grouping mirrors the server order instead of re-sorting the page by date.
+  // Search results and cross-account views are always chronological.
+  const fetchedListOrder = useEmailStore((state) => state.listOrder);
+  const crossView = useEmailStore((state) => state.crossView);
 
   const threadGroups = useMemo(() => {
+    const listOrder = searchQuery || crossView || !isFilterEmpty(searchFilters) ? [] : fetchedListOrder;
     const groups = groupEmailsByThread(emails, disableThreading || isScheduledView, threadEmailCounts);
-    return sortThreadGroups(groups);
-  }, [emails, disableThreading, isScheduledView, threadEmailCounts]);
+    return sortThreadGroups(groups, listOrder);
+  }, [emails, disableThreading, isScheduledView, threadEmailCounts, fetchedListOrder, searchQuery, crossView, searchFilters]);
 
   const { contextMenu, openContextMenu, closeContextMenu, menuRef } = useContextMenu<Email>();
   /**
@@ -145,6 +154,32 @@ export function EmailList({
 
   const [isProcessing, setIsProcessing] = useState(false);
   const parentRef = useRef<HTMLDivElement>(null);
+  const batchToolbarRef = useRef<HTMLDivElement>(null);
+  // The batch toolbar sits above the scroll container, so as it animates
+  // open it shrinks the list and would shove every row downwards. Feed each
+  // height change back into scrollTop so the rows stay put on screen (and
+  // slide back when the toolbar collapses again).
+  //
+  // Except at the very top: there are no rows above to hold steady, so the
+  // compensation just scrolls the first message underneath the toolbar and
+  // reads as the toolbar covering the message you selected. Let the list
+  // move down there instead.
+  useEffect(() => {
+    const toolbar = batchToolbarRef.current;
+    if (!toolbar || typeof ResizeObserver === 'undefined') return;
+    let lastHeight = toolbar.getBoundingClientRect().height;
+    const observer = new ResizeObserver((entries) => {
+      const height = entries[0]?.contentRect.height ?? toolbar.getBoundingClientRect().height;
+      const delta = height - lastHeight;
+      lastHeight = height;
+      const list = parentRef.current;
+      if (!list || delta === 0) return;
+      if (delta > 0 && list.scrollTop <= 0) return;
+      list.scrollTop = Math.max(0, list.scrollTop + delta);
+    });
+    observer.observe(toolbar);
+    return () => observer.disconnect();
+  }, []);
   // One tag treatment for the whole list, measured from the scroll container.
   const tagDisplay = useMeasuredTagDisplay(parentRef);
   const density = useSettingsStore((state) => state.density);
@@ -347,6 +382,7 @@ export function EmailList({
     <div className={cn("flex flex-col min-h-0", className)}>
       {/* Batch Actions Toolbar */}
       <div
+        ref={batchToolbarRef}
         className={cn(
           "transition-all duration-300 ease-in-out overflow-hidden",
           hasSelection && !isScheduledView ? "max-h-16 opacity-100" : "max-h-0 opacity-0"
@@ -558,6 +594,7 @@ export function EmailList({
                       onSetTag={onSetTag}
                       onMarkAsSpam={onMarkAsSpam ? (email) => onMarkAsSpam(email) : undefined}
                       onUndoSpam={onUndoSpam ? (email) => onUndoSpam(email) : undefined}
+                      onOpenAttachment={onOpenAttachment}
                     />
                   </div>
                 );

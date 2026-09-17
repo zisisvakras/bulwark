@@ -149,6 +149,34 @@ export function getContactDisplayName(contact: ContactCard): string {
   return '';
 }
 
+// Name used to order (and letter-group) the contact list. With `byLastName`
+// the surname leads ("Smith, Alice") so family members sit together (#963).
+// Contacts without a structured surname fall back to the last word of
+// `name.full`; everything else (nickname, org, email) keeps the display name.
+export function getContactSortName(contact: ContactCard, byLastName: boolean): string {
+  const display = getContactDisplayName(contact);
+  if (!byLastName) return display;
+  const components = contact.name?.components;
+  if (components && components.length > 0) {
+    const pick = (...kinds: string[]) =>
+      components.filter(c => kinds.includes(c.kind) && c.value).map(c => c.value).join(' ');
+    const surname = pick('surname', 'surname2');
+    if (surname) {
+      const rest = pick('given', 'given2', 'middle', 'additional');
+      return rest ? `${surname}, ${rest}` : surname;
+    }
+  }
+  const full = contact.name?.full;
+  if (full && display === full) {
+    const words = full.trim().split(/\s+/);
+    if (words.length > 1) {
+      const last = words[words.length - 1];
+      return `${last}, ${words.slice(0, -1).join(' ')}`;
+    }
+  }
+  return display;
+}
+
 export function getContactPrimaryEmail(contact: ContactCard): string {
   if (!contact.emails) return '';
   return Object.values(contact.emails)[0]?.address || '';
@@ -312,6 +340,7 @@ interface ContactStore {
   moveContactToAddressBook: (client: IJMAPClient, contactIds: string[], addressBook: AddressBook) => Promise<void>;
   createAddressBook: (client: IJMAPClient, name: string) => Promise<AddressBook>;
   renameAddressBook: (client: IJMAPClient, addressBook: AddressBook, newName: string) => Promise<void>;
+  setDefaultAddressBook: (client: IJMAPClient, addressBook: AddressBook) => Promise<void>;
   removeAddressBook: (client: IJMAPClient, addressBook: AddressBook) => Promise<void>;
   shareAddressBook: (client: IJMAPClient, addressBook: AddressBook, principalId: string, rights: AddressBookRights | null) => Promise<void>;
   renameKeyword: (client: IJMAPClient | null, oldKeyword: string, newKeyword: string) => Promise<void>;
@@ -741,7 +770,9 @@ export const useContactStore = create<ContactStore>()(
 
         const groupData: Partial<ContactCard> = {
           kind: 'group',
-          name: { components: [{ kind: 'given', value: name }], isOrdered: true },
+          // `full` feeds the mandatory vCard FN; without it strict CardDAV
+          // clients (Apple Contacts) drop the card entirely (#430).
+          name: { components: [{ kind: 'given', value: name }], isOrdered: true, full: name },
           members,
         };
 
@@ -760,7 +791,7 @@ export const useContactStore = create<ContactStore>()(
 
       updateGroup: async (client, groupId, name) => {
         const updates: Partial<ContactCard> = {
-          name: { components: [{ kind: 'given', value: name }], isOrdered: true },
+          name: { components: [{ kind: 'given', value: name }], isOrdered: true, full: name },
         };
         if (client && get().supportsSync) {
           const group = get().contacts.find(c => c.id === groupId);
@@ -1008,6 +1039,35 @@ export const useContactStore = create<ContactStore>()(
           }));
         } catch (error) {
           const msg = error instanceof Error ? error.message : 'Failed to rename address book';
+          set({ error: msg });
+          throw error;
+        }
+      },
+
+      setDefaultAddressBook: async (client, addressBook) => {
+        set({ error: null });
+        try {
+          const originalId = addressBook.originalId || stripLocalAccountPrefix(addressBook.id, addressBook.localAccountId);
+          const accountId = addressBook.isShared ? addressBook.accountId : undefined;
+          client = resolveAccountClient(client, addressBook.localAccountId);
+          await client.setDefaultAddressBook(originalId, accountId);
+          set((state) => ({
+            addressBooks: state.addressBooks.map(b => {
+              if (b.id === addressBook.id) return { ...b, isDefault: true };
+              // Only one default per account - clear the flag on siblings in the
+              // same local account / shared-account scope.
+              if (
+                b.isDefault
+                && (b.localAccountId ?? null) === (addressBook.localAccountId ?? null)
+                && (b.accountId ?? null) === (addressBook.accountId ?? null)
+              ) {
+                return { ...b, isDefault: false };
+              }
+              return b;
+            }),
+          }));
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : 'Failed to set default address book';
           set({ error: msg });
           throw error;
         }

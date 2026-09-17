@@ -1,19 +1,21 @@
 "use client";
 
 import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, useId } from "react";
-import DOMPurify from "dompurify";
 import { Email, ContactCard, Mailbox } from "@/lib/jmap/types";
 import { emailExportFilename, attachmentDownloadFilename, attachmentsBundleFilename, DEFAULT_EMAIL_TEMPLATE, DEFAULT_ATTACHMENT_TEMPLATE } from "@/lib/download-filename";
 import { EML_IMPORT_ACCEPT, expandImportableEmails } from "@/lib/eml-import";
-import { EMAIL_IFRAME_SANITIZE_CONFIG, applyNewTabToAnchor, blockExternalResourcesOnNode, collapseBlockedImageContainers, escapeHtml, plainTextToSafeHtml, restrictDataUriResourcesOnNode, sanitizeEmailHtml, sanitizeEmailHtmlForIframe, sanitizePlainTextRenderedHtml } from "@/lib/email-sanitization";
-import { hasMeaningfulHtmlBody } from "@/lib/signature-utils";
+import { applyNewTabToAnchor, escapeHtml, plainTextToSafeHtml, sanitizeEmailBodyForIframe, sanitizeEmailHtml, sanitizePlainTextRenderedHtml } from "@/lib/email-sanitization";
+import { getRenderableHtmlBody } from "@/lib/email-body-selection";
+import { collectReferencedCids, isEmbeddedInBody } from "@/lib/attachment-visibility";
 import { collapsePlainTextQuotes, setupQuoteCollapse } from "@/lib/quote-collapse";
+import { fitEmailBodyWidth } from "@/lib/email-fit-width";
 import { withBasePath } from "@/lib/browser-navigation";
 import { buildContactsPath, buildMailPath } from "@/lib/deep-links";
 import { useCopyLink } from "@/hooks/use-copy-link";
 import { Button } from "@/components/ui/button";
 import { Avatar } from "@/components/ui/avatar";
 import { formatFileSize, cn, buildMailboxTree, MailboxNode, formatDateTime, generateUUID } from "@/lib/utils";
+import { emailDisplayDate } from "@/lib/email-date";
 import { TagBadge } from "./tag-badge";
 import { TagPicker } from "./tag-picker";
 import { useMeasuredTagDisplay } from "@/hooks/use-tag-display";
@@ -78,6 +80,8 @@ import {
   PenSquare,
   CalendarClock,
   Link as LinkIcon,
+  Maximize2,
+  Minimize2,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useRouter } from "@/i18n/navigation";
@@ -87,6 +91,7 @@ import { useUIStore } from "@/stores/ui-store";
 import { useContactStore, getContactDisplayName, getContactPrimaryEmail } from "@/stores/contact-store";
 import { toast } from "@/stores/toast-store";
 import { useDeviceDetection } from "@/hooks/use-media-query";
+import { useIsPaneScoped } from "@/hooks/use-pane-context";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAccountStore } from "@/stores/account-store";
 import { useEmailStore } from "@/stores/email-store";
@@ -97,7 +102,6 @@ import { CalendarInvitationBanner } from "./calendar-invitation-banner";
 import { ReadReceiptBanner } from "./read-receipt-banner";
 import { stripCrossAccountIdentityPrefix } from "@/hooks/use-pro-multi-account-identities";
 import { useTour } from "@/components/tour/tour-provider";
-import { useIsEmbedded } from "@/hooks/use-is-embedded";
 import { useMenuNavigation } from "@/hooks/use-menu-navigation";
 import { findCalendarAttachment, isCalendarMimeType } from "@/lib/calendar-invitation";
 import { RecipientPopover } from "./recipient-popover";
@@ -113,6 +117,12 @@ import { emailHooks, uiHooks, renderHooks } from "@/lib/plugin-hooks";
 import type { AttachmentInfo, AttachmentPreview } from "@/lib/plugin-types";
 import { useAttachmentDrag, isDragOutSupported, type AttachmentDragSource } from "@/hooks/use-attachment-drag";
 import type { IJMAPClient } from "@/lib/jmap/client-interface";
+
+/** The More menu's two drill-downs: a folder list and a tag list. */
+type MoreMenuSub = 'move' | 'tag';
+
+/** Whatever a sub-view offers to act on, in the order it is read out. */
+const SUB_MENU_ITEM_SELECTOR = '[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"]';
 
 interface EmailViewerProps {
   email: Email | null;
@@ -139,6 +149,13 @@ interface EmailViewerProps {
   onCancelScheduledForEdit?: () => void;
   onRescheduleScheduled?: (delayedUntil: string) => void;
   onCompose?: () => void;
+  /**
+   * Fullscreen reading toggle (standard interface only - Pro email tabs are
+   * fullscreen by construction). When set, the toolbar shows a maximize /
+   * minimize button; `isFullscreen` reflects the host's current state.
+   */
+  onToggleFullscreen?: () => void;
+  isFullscreen?: boolean;
   currentUserEmail?: string;
   currentUserName?: string;
   currentMailboxRole?: string;
@@ -638,6 +655,8 @@ export function EmailViewer({
   onCancelScheduledForEdit,
   onRescheduleScheduled,
   onCompose,
+  onToggleFullscreen,
+  isFullscreen = false,
   currentUserEmail,
   currentUserName,
   currentMailboxRole,
@@ -656,6 +675,7 @@ export function EmailViewer({
   const tWelcome = useTranslations('welcome');
   const externalContentPolicy = useSettingsStore((state) => state.externalContentPolicy);
   const messageSpacing = useSettingsStore((state) => state.messageSpacing);
+  const plainTextFont = useSettingsStore((state) => state.plainTextFont);
   const mailAttachmentAction = useSettingsStore((state) => state.mailAttachmentAction);
   const attachmentPosition = useSettingsStore((state) => state.attachmentPosition);
   const addTrustedSender = useSettingsStore((state) => state.addTrustedSender);
@@ -710,6 +730,12 @@ export function EmailViewer({
 
   // Tablet list visibility
   const { isTablet, isMobile } = useDeviceDetection();
+  // Inside a Pro pane, `isMobile` above is pane-width based: overlays that
+  // would go viewport-fixed must instead cover just the pane (via
+  // PaneOverlay + absolute positioning), and viewport CSS breakpoints like
+  // `sm:hidden` must not be trusted - the viewport may be desktop-sized
+  // while the pane is phone-sized.
+  const isPaneScoped = useIsPaneScoped();
   const { tabletListVisible } = useUIStore();
   const { identities, client, isDemoMode, activeAccountId } = useAuthStore();
   const activeAccount = useAccountStore((s) => s.accounts.find((a) => a.id === activeAccountId));
@@ -772,7 +798,6 @@ export function EmailViewer({
   }, [client, t, tComposer]);
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const { startTour } = useTour();
-  const isEmbedded = useIsEmbedded();
   const [showFullHeaders, setShowFullHeaders] = useState(false);
   const [showAllBesideAttachments, setShowAllBesideAttachments] = useState(false);
   const [showAllMobileAttachments, setShowAllMobileAttachments] = useState(false);
@@ -803,7 +828,13 @@ export function EmailViewer({
   };
   const [showSourceModal, setShowSourceModal] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
-  const [moreMenuSub, setMoreMenuSub] = useState<'move' | 'tag' | null>(null);
+  // The mobile More panel sits off-canvas with a slide transition. Until
+  // the user opens it once, that transition must stay off: on the first
+  // paint after the viewer mounts WebKit transitions `translate` from its
+  // registered initial value (0) to 100%, so the panel flashed on screen
+  // and slid out every time a message was opened on a phone.
+  const [moreMenuSlideEnabled, setMoreMenuSlideEnabled] = useState(false);
+  const [moreMenuSub, setMoreMenuSub] = useState<MoreMenuSub | null>(null);
   const [tagMenuOpen, setTagMenuOpen] = useState(false);
   const [moveMenuOpen, setMoveMenuOpen] = useState(false);
   const moreMenuRef = useRef<HTMLDivElement>(null);
@@ -811,6 +842,12 @@ export function EmailViewer({
   const moveMenuRef = useRef<HTMLDivElement>(null);
   const moreButtonRef = useRef<HTMLButtonElement>(null);
   const moveButtonRef = useRef<HTMLButtonElement>(null);
+  // The rows that open a sub-view, and the pieces of the mobile panel a
+  // sub-view replaces. Desktop and mobile never render their More menu at the
+  // same time, so one map serves both.
+  const moreEntryRefs = useRef<Record<MoreMenuSub, HTMLButtonElement | null>>({ move: null, tag: null });
+  const mobileSubBackRef = useRef<HTMLButtonElement>(null);
+  const mobileSubListRef = useRef<HTMLDivElement>(null);
   // Pro can mount two reading panes side by side, so the menu id has to be
   // per-instance for aria-controls to point at the right one.
   const moreMenuId = useId();
@@ -834,6 +871,54 @@ export function EmailViewer({
     onClose: closeMoveMenu,
     triggerRef: moveButtonRef,
   });
+  // Leaving a sub-view unmounts the row that opened it, so focus has to be put
+  // back by hand or it falls to <body> and a screen reader is left with nothing
+  // to read (#779).
+  const leaveMoreMenuSub = useCallback(() => {
+    const sub = moreMenuSub;
+    setMoreMenuSub(null);
+    if (!sub) return;
+    // The mobile panel unmounts the entry while its sub-view is on screen, so
+    // the ref only points at a button again once the top level is back.
+    requestAnimationFrame(() => moreEntryRefs.current[sub]?.focus());
+  }, [moreMenuSub]);
+  // Escape inside a sub-view backs out of it; only an Escape on the top level
+  // dismisses the whole menu.
+  const withSubMenuEscape = useCallback(
+    (next: (e: React.KeyboardEvent) => void) => (e: React.KeyboardEvent) => {
+      if (e.key === 'Escape' && moreMenuSub) {
+        e.preventDefault();
+        e.stopPropagation();
+        leaveMoreMenuSub();
+        return;
+      }
+      next(e);
+    },
+    [moreMenuSub, leaveMoreMenuSub],
+  );
+  const handleMoreMenuKeyDown = useMemo(
+    () => withSubMenuEscape(onMoreMenuKeyDown),
+    [withSubMenuEscape, onMoreMenuKeyDown],
+  );
+  const handleMobileMoreKeyDown = useMemo(
+    () => withSubMenuEscape(onMobileMoreKeyDown),
+    [withSubMenuEscape, onMobileMoreKeyDown],
+  );
+  // The mobile panel swaps its whole body for the sub-view, so entering one
+  // leaves the user nowhere unless focus follows it in. Desktop keeps the entry
+  // button mounted beside its flyout and needs no help.
+  const previousMoreMenuSub = useRef<MoreMenuSub | null>(null);
+  useEffect(() => {
+    const previous = previousMoreMenuSub.current;
+    previousMoreMenuSub.current = moreMenuSub;
+    if (!isMobile || !moreMenuOpen || !moreMenuSub || previous === moreMenuSub) return;
+    // A frame of slack lets the sub-view render before we look for its items.
+    const frame = requestAnimationFrame(() => {
+      const first = mobileSubListRef.current?.querySelector<HTMLElement>(SUB_MENU_ITEM_SELECTOR);
+      (first ?? mobileSubBackRef.current)?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [moreMenuSub, moreMenuOpen, isMobile]);
   const [hiddenPriorities, setHiddenPriorities] = useState<Set<number>>(new Set());
   const currentTagIds = getEmailTagIds(email?.keywords);
   const sortedTagIds = sortTagIds(currentTagIds);
@@ -940,7 +1025,13 @@ export function EmailViewer({
   useEffect(() => {
     if (!moreMenuOpen && !tagMenuOpen && !moveMenuOpen) return;
     function handleClickOutside(e: MouseEvent) {
-      if (moreMenuOpen && moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) {
+      // On mobile the More menu is an off-canvas panel rendered as a sibling of
+      // the toolbar, so it is not inside `moreMenuRef`. Without counting it as
+      // part of the menu every tap on one of its rows read as a click away and
+      // tore the menu down before the row's own click could open its sub-view -
+      // "tag" and "move" just dropped the user back on the trigger (#779).
+      const moreRoots = [moreMenuRef.current, mobileMoreRef.current].filter((el): el is HTMLDivElement => el !== null);
+      if (moreMenuOpen && moreRoots.length > 0 && !moreRoots.some((root) => root.contains(e.target as Node))) {
         setMoreMenuOpen(false);
         setMoreMenuSub(null);
       }
@@ -953,7 +1044,7 @@ export function EmailViewer({
     }
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [moreMenuOpen, tagMenuOpen, moveMenuOpen]);
+  }, [moreMenuOpen, tagMenuOpen, moveMenuOpen, mobileMoreRef]);
 
   // Close dropdowns when email changes
   useEffect(() => {
@@ -1493,8 +1584,14 @@ export function EmailViewer({
 
   const effectiveAttachments = useMemo<EffectiveAttachment[]>(() => {
     if (pluginRenderedAttachments.length > 0) {
+      const pluginCids = collectReferencedCids(hideInlineImageAttachments ? pluginRenderedHtml : null);
       return pluginRenderedAttachments
-        .filter(att => !(hideInlineImageAttachments && att.contentId && (att.mimeType || '').startsWith('image/')))
+        // Any cid image counts as embedded here (as before), plus whatever the
+        // decrypted body references by cid (see lib/attachment-visibility.ts).
+        .filter(att => !(hideInlineImageAttachments && (
+          (att.contentId && (att.mimeType || '').startsWith('image/'))
+          || isEmbeddedInBody({ cid: att.contentId, type: att.mimeType, disposition: att.disposition }, pluginCids)
+        )))
         .map((attachment, index) => ({
           id: `smime-${index}-${attachment.filename || attachment.mimeType}`,
           name: attachment.filename,
@@ -1506,6 +1603,12 @@ export function EmailViewer({
     }
 
     const hasCalInvitation = calendarInvitationParsingEnabled && !!email && !!findCalendarAttachment(email);
+    // Parts the rendered body embeds via cid: must not double as chips. The
+    // scan reads the same HTML the body renders from (null when the message
+    // renders as plain text: nothing embedded, nothing hidden), so a part only
+    // recognisable by its reference - octet-stream, no disposition, no name -
+    // is caught as well (see lib/attachment-visibility.ts).
+    const bodyCids = collectReferencedCids(hideInlineImageAttachments && email ? getRenderableHtmlBody(email) : null);
     const jmapAttachments = (email?.attachments ?? [])
       // Hide winmail.dat when we have successfully extracted TNEF content or attachments
       .filter(att => !(tnefHtml || tnefText || tnefAttachments.length > 0) || !isTnefAttachment(att.name, att.type))
@@ -1515,9 +1618,9 @@ export function EmailViewer({
       // Hide calendar MIME parts (text/calendar, application/ics) when the invitation
       // banner is shown - prevents raw ICS files appearing as spurious attachments.
       .filter(att => !hasCalInvitation || !isCalendarMimeType(att.type))
-      // Hide inline cid-referenced images when the user has opted to keep them
-      // out of the attachment list (default on): these are embedded in the body.
-      .filter(att => !(hideInlineImageAttachments && att.cid && att.disposition === 'inline' && (att.type || '').startsWith('image/')))
+      // Hide body-embedded parts when the user has opted to keep them out of
+      // the attachment list (default on).
+      .filter(att => !(hideInlineImageAttachments && isEmbeddedInBody(att, bodyCids)))
       // Hide machine-readable report parts (MDN read-receipts, DSN bounce
       // reports). These are required MIME parts, not real user attachments.
       .filter(att => att.type !== 'message/disposition-notification' && att.type !== 'message/delivery-status')
@@ -1552,11 +1655,11 @@ export function EmailViewer({
 
     return [...jmapAttachments, ...tnefExtracted, ...embeddedExtracted];
     // The memo derives only from `email.attachments` (findCalendarAttachment
-    // scans that array); depending on the whole `email` object would rebuild the
-    // attachment list — and its downstream layout measurement — on every email
-    // field change.
+    // scans that array) and the body parts the cid scan reads; depending on
+    // the whole `email` object would rebuild the attachment list — and its
+    // downstream layout measurement — on every email field change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [email?.attachments, pluginRenderedAttachments, tnefHtml, tnefText, tnefAttachments, embeddedEmailAttachments, calendarInvitationParsingEnabled, hideInlineImageAttachments]);
+  }, [email?.attachments, email?.htmlBody, email?.textBody, email?.bodyValues, pluginRenderedAttachments, pluginRenderedHtml, tnefHtml, tnefText, tnefAttachments, embeddedEmailAttachments, calendarInvitationParsingEnabled, hideInlineImageAttachments]);
 
   // Measure attachment chips in the below-header row to determine how many fit
   // on a single line; the rest collapse into a "+N attachments" overflow pill.
@@ -1609,41 +1712,38 @@ export function EmailViewer({
     }
   };
 
+  // Whether external resources must be blocked for the message on screen.
+  // Shared by every body path - the message's own HTML, TNEF, unwrapped
+  // message/rfc822, and plugin-rendered (decrypted) bodies - so the user's
+  // preference is enforced no matter which one produces the HTML (#797).
+  //   'allow' = never block, 'block' = always block (unless trusted),
+  //   'ask'   = block until the user allows this message or trusts the sender.
+  const shouldBlockExternal = useMemo(() => {
+    if (!email) return false;
+    const senderEmail = email.from?.[0]?.email?.toLowerCase();
+    const senderIsTrusted = senderEmail
+      ? isSenderTrusted(senderEmail) || (trustedSendersAddressBook && isTrustedAddressBookSender(senderEmail))
+      : false;
+    return !senderIsTrusted && (
+      externalContentPolicy === 'block' ||
+      (externalContentPolicy === 'ask' && !allowExternalContent)
+    );
+    // Trust selectors are read inside and re-read whenever the message or the
+    // permission changes, so they're deliberately omitted from deps (matches
+    // the srcDoc rebuild contract described on `emailContent`).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [email, externalContentPolicy, allowExternalContent]);
+
   // Sanitize and prepare email HTML content
   const emailContent = useMemo(() => {
     if (!email) return { html: "", isHtml: false, hasStyleTag: false, externalBlocked: false };
 
     // Check if we have body values
     if (email.bodyValues) {
-      // Check if HTML content exists and if it's actually rich HTML or just plain text wrapper
-      let useHtmlVersion = false;
-      let htmlContent = '';
+      // Rich HTML, or just a plain-text wrapper the server dressed up as HTML?
+      let htmlContent = getRenderableHtmlBody(email);
 
-      if (email.htmlBody?.[0]?.partId && email.bodyValues[email.htmlBody[0].partId]) {
-        htmlContent = email.bodyValues[email.htmlBody[0].partId].value;
-        // Per RFC 8621 § 4.1.4, when a message has only one alternative the server
-        // exposes the same part in both htmlBody and textBody. The shared part may
-        // actually be text/plain (plain-text-only mail) - rendering that as HTML
-        // collapses newlines and skips linkification, so route by the part's type.
-        const htmlPart = email.htmlBody[0];
-        if (htmlPart.type && htmlPart.type.toLowerCase() !== 'text/html') {
-          useHtmlVersion = false;
-        } else {
-          // Prefer textBody when HTML is auto-generated minimal wrapper (no rich formatting).
-          // Server-generated HTML from text/plain emails often lacks <br> tags, collapsing newlines.
-          const textPartId = email.textBody?.[0]?.partId;
-          const htmlPartId = htmlPart.partId;
-          const hasDistinctTextBody = !!textPartId && textPartId !== htmlPartId && !!email.bodyValues[textPartId];
-          if (hasDistinctTextBody && htmlContent) {
-            useHtmlVersion = hasMeaningfulHtmlBody(htmlContent);
-          } else {
-            useHtmlVersion = !!htmlContent;
-          }
-        }
-      }
-
-      // If we should use HTML version and it exists
-      if (useHtmlVersion && htmlContent) {
+      if (htmlContent) {
         // Replace cid: references with authenticated blob URLs (fetched via useEffect)
         // This prevents browser auth dialogs that occur when loading raw JMAP download URLs
         if (email.attachments) {
@@ -1655,59 +1755,10 @@ export function EmailViewer({
           );
         }
 
-        // Create a custom DOMPurify hook to handle external content
-        let blockedExternalContent = false;
-
-        // Use shared sanitization config as base (more secure)
-        const sanitizeConfig = { ...EMAIL_IFRAME_SANITIZE_CONFIG };
-
-        // Check if sender is trusted (localStorage list or address book)
-        const senderEmail = email.from?.[0]?.email?.toLowerCase();
-        const senderIsTrusted = senderEmail
-          ? isSenderTrusted(senderEmail) || (trustedSendersAddressBook && isTrustedAddressBookSender(senderEmail))
-          : false;
-
-        // Block external content based on policy:
-        // 'allow' = never block, 'block' = always block (unless trusted), 'ask' = block until user allows or trusted
-        const shouldBlockExternal = !senderIsTrusted && (
-          externalContentPolicy === 'block' ||
-          (externalContentPolicy === 'ask' && !allowExternalContent)
-        );
-
-        if (shouldBlockExternal) {
-          sanitizeConfig.FORBID_TAGS = [...sanitizeConfig.FORBID_TAGS, 'link'];
-        }
-
-        DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-          if (shouldBlockExternal) {
-            // Blocks every external-resource vector (img src incl.
-            // whitespace/newline tricks, srcset, <source>, <video poster>,
-            // media src, background attr, inline style url() incl. CSS
-            // escapes). The strict iframe CSP below is the network backstop.
-            if (blockExternalResourcesOnNode(node)) {
-              blockedExternalContent = true;
-            }
-          }
-
-          // http(s) links open in a new tab; other schemes keep their default.
-          applyNewTabToAnchor(node);
-
-          // Re-apply the data:-URI allowlist DOMPurify skips on media tags.
-          restrictDataUriResourcesOnNode(node);
-
-          // No dark mode color transforms - emails render true-to-life in iframe
-        });
-
-        // Sanitize HTML to prevent XSS
-        let cleanHtml = DOMPurify.sanitize(htmlContent, sanitizeConfig);
-
-        // Remove the hook after sanitization
-        DOMPurify.removeAllHooks();
-
-        // Collapse empty containers left behind by blocked images
-        if (shouldBlockExternal && blockedExternalContent) {
-          cleanHtml = collapseBlockedImageContainers(cleanHtml);
-        }
+        // Sanitize (no dark mode color transforms - emails render true-to-life
+        // in the iframe) and enforce the external-content policy.
+        const { html: cleanHtml, blockedExternalContent } =
+          sanitizeEmailBodyForIframe(htmlContent, shouldBlockExternal);
 
         // Update blocked content state
         if (blockedExternalContent && !hasBlockedContent) {
@@ -1768,10 +1819,10 @@ export function EmailViewer({
     // unblocked content AND the permissive CSP. The strict blocking-mode CSP
     // can't be relaxed in place (a document's CSP is fixed at load), so the
     // "Load images" / "Trust sender" buttons (both flip allowExternalContent)
-    // intentionally trigger a fresh srcDoc. Trust selectors are read inside and
-    // re-read on that rebuild, so they're deliberately omitted from deps.
+    // intentionally trigger a fresh srcDoc - `shouldBlockExternal` carries that
+    // change in, and re-reads the trust selectors on the way.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [email, externalContentPolicy, allowExternalContent, cidBlobUrls, t]);
+  }, [email, shouldBlockExternal, cidBlobUrls, t]);
 
   // Override email content with S/MIME decrypted content when available
   const effectiveEmailContent = useMemo(() => {
@@ -1780,6 +1831,23 @@ export function EmailViewer({
         show: t('show_quoted_text'),
         hide: t('hide_quoted_text'),
       });
+    // Bodies that bypass `emailContent` (plugin-decrypted, TNEF, unwrapped
+    // message/rfc822) are still email content the user never asked to trust, so
+    // they get the same external-resource treatment - blocking walk, blocked
+    // banner, and the strict iframe CSP via `externalBlocked` (#797).
+    const renderHtml = (html: string) => {
+      const { html: cleanHtml, blockedExternalContent } =
+        sanitizeEmailBodyForIframe(html, shouldBlockExternal);
+      if (blockedExternalContent && !hasBlockedContent) {
+        setHasBlockedContent(true);
+      }
+      return {
+        html: cleanHtml,
+        isHtml: true,
+        hasStyleTag: /<style[\s>]/i.test(html),
+        externalBlocked: shouldBlockExternal,
+      };
+    };
     if (pluginRenderedHtml) {
       const htmlWithCidUrls = pluginRenderedHtml.replace(
         /\bcid:([^"'\s)]+)/gi,
@@ -1787,30 +1855,30 @@ export function EmailViewer({
           return cidBlobUrls[cidRef] || 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
         }
       );
-      const cleanHtml = sanitizeEmailHtmlForIframe(htmlWithCidUrls);
-      return { html: cleanHtml, isHtml: true, hasStyleTag: /<style[\s>]/i.test(pluginRenderedHtml), externalBlocked: false };
+      return renderHtml(htmlWithCidUrls);
     }
     if (pluginRenderedText) {
       return { html: plainToHtml(pluginRenderedText), isHtml: false, hasStyleTag: false, externalBlocked: false };
     }
     // TNEF (winmail.dat) extracted content
     if (tnefHtml) {
-      const cleanHtml = sanitizeEmailHtmlForIframe(tnefHtml);
-      return { html: cleanHtml, isHtml: true, hasStyleTag: /<style[\s>]/i.test(tnefHtml), externalBlocked: false };
+      return renderHtml(tnefHtml);
     }
     if (tnefText) {
       return { html: plainToHtml(tnefText), isHtml: false, hasStyleTag: false, externalBlocked: false };
     }
     // Embedded message/rfc822 unwrapped content
     if (embeddedEmailHtml) {
-      const cleanHtml = sanitizeEmailHtmlForIframe(embeddedEmailHtml);
-      return { html: cleanHtml, isHtml: true, hasStyleTag: /<style[\s>]/i.test(embeddedEmailHtml), externalBlocked: false };
+      return renderHtml(embeddedEmailHtml);
     }
     if (embeddedEmailText) {
       return { html: plainToHtml(embeddedEmailText), isHtml: false, hasStyleTag: false, externalBlocked: false };
     }
     return emailContent;
-  }, [cidBlobUrls, emailContent, pluginRenderedHtml, pluginRenderedText, tnefHtml, tnefText, embeddedEmailHtml, embeddedEmailText, t]);
+    // `hasBlockedContent` is only read to avoid a redundant setState; including
+    // it would re-run the whole sanitize pass the moment the banner appears.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cidBlobUrls, emailContent, shouldBlockExternal, pluginRenderedHtml, pluginRenderedText, tnefHtml, tnefText, embeddedEmailHtml, embeddedEmailText, t]);
 
   const resolveAttachmentName = useCallback(
     (attachment: EffectiveAttachment) => {
@@ -2090,6 +2158,13 @@ export function EmailViewer({
   // Iframe for rendering HTML emails true-to-life
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
+  // Scale-to-fit is a phone behaviour: on a desktop reading pane a wide mail is
+  // legible at 1:1 and scrolls. Held in a ref because the measurement runs from
+  // observers wired up once per document - a plain closure would keep fitting
+  // (or not) across a rotation or a pane resize that crossed the breakpoint.
+  const fitBodyToWidthRef = useRef(isMobile);
+  fitBodyToWidthRef.current = isMobile;
+
   // Detect if the email HTML has native dark mode support
   const emailHasNativeDarkMode = useMemo(() => {
     if (!effectiveEmailContent.isHtml) return false;
@@ -2210,7 +2285,10 @@ export function EmailViewer({
      overflow-x is auto on the body so an intrinsically wide table (e.g. a
      20-column data table) can scroll horizontally instead of being crushed to
      fit - the latter wraps header text to one character per line, which reads
-     as 90deg-rotated vertical headers (issue #409). */
+     as 90deg-rotated vertical headers (issue #409). On a phone that scroll is
+     the wrong answer for ordinary fixed-width mail, so fitEmailBodyWidth()
+     shrinks the whole body to the screen width after load and only content too
+     wide to stay legible when scaled keeps scrolling. */
   html { overflow: hidden; height: auto !important; }
   /* Some emails put height:100% on a full-bleed wrapper table/div (not html/body),
      which - with body's overflow:hidden - clips the content to a sliver, and the
@@ -2222,14 +2300,19 @@ export function EmailViewer({
   @media (max-width: 640px) { body { padding-left: ${mobileBodyPaddingX}; padding-right: ${mobileBodyPaddingX}; } }
   img { max-width: 100% !important; height: auto !important; }
   a { color: #1a73e8; }
-  table { max-width: 100% !important; table-layout: auto; overflow-wrap: break-word; }
+  /* Only force the cap on tables that set no width of their own: an
+     !important 100% would also override a newsletter's inline
+     max-width:600px and stretch it across the pane. (#790) */
+  table:not([style*="max-width"]) { max-width: 100% !important; }
+  table[style*="max-width"] { max-width: 100%; }
+  table { table-layout: auto; overflow-wrap: break-word; }
   /* break-word (not anywhere): break only over-long single words, and keep each
      word's min-content width so columns are not collapsed to a single char. */
   td, th { overflow-wrap: break-word; }
   pre { white-space: pre-wrap; word-wrap: break-word; }
   ${wordHtmlCSS}
   ${darkModeCSS}
-</style></head><body>${effectiveEmailContent.html}<style>html,body{height:auto!important;min-height:0!important;max-height:none!important}</style></body></html>`;
+</style></head><body dir="auto">${effectiveEmailContent.html}<style>html,body{height:auto!important;min-height:0!important;max-height:none!important}</style></body></html>`;
   }, [effectiveEmailContent.html, effectiveEmailContent.isHtml, effectiveEmailContent.hasStyleTag, effectiveEmailContent.externalBlocked, isDark, emailHasNativeDarkMode, messageSpacing]);
 
   // Unblocking external content is handled by rebuilding the iframe srcDoc:
@@ -2262,6 +2345,12 @@ export function EmailViewer({
   // be torn down. contentDocument keeps pointing at it until the browser swaps
   // the new srcDoc in, so the poll skips it to avoid wiring up stale content.
   const staleDocRef = useRef<Document | null>(null);
+  // Host-side observer on the iframe box itself: the in-document one watches
+  // body, whose width scale-to-fit pins to the content width, so a viewport
+  // change (rotation, pane resize) would otherwise never re-fit. Kept in a ref
+  // so each srcDoc replaces the previous one instead of stacking observers.
+  const frameSizeObserverRef = useRef<ResizeObserver | null>(null);
+  useEffect(() => () => frameSizeObserverRef.current?.disconnect(), []);
   useLayoutEffect(() => {
     setIframeReady(false);
     initializedDocRef.current = null;
@@ -2295,12 +2384,31 @@ export function EmailViewer({
         // documentElement.scrollHeight short while the real content lives in body.
         const applyHeight = () => {
           if (iframe.contentDocument !== doc) return; // navigated away; stale
-          const height = Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight);
+          // Shrink desktop-width mail to fit a phone screen first: it changes
+          // the layout height, and the transform doesn't shrink the measured
+          // (layout) height, so the iframe box has to be scaled by hand.
+          const scale = fitEmailBodyWidth(doc, { enabled: fitBodyToWidthRef.current });
+          const height = Math.ceil(
+            Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight) * scale
+          );
           iframe.style.height = height + 'px';
           lastBodyHeightRef.current = height;
         };
         const resizeObserver = new ResizeObserver(applyHeight);
         resizeObserver.observe(doc.body);
+        // Re-fit when the iframe itself changes width. Height-only changes are
+        // our own applyHeight writing back, so they're ignored - re-entering on
+        // those would spin the observer.
+        let lastFrameWidth = iframe.clientWidth;
+        frameSizeObserverRef.current?.disconnect();
+        const frameObserver = new ResizeObserver(() => {
+          if (iframe.contentDocument !== doc) return;
+          if (iframe.clientWidth === lastFrameWidth) return;
+          lastFrameWidth = iframe.clientWidth;
+          applyHeight();
+        });
+        frameObserver.observe(iframe);
+        frameSizeObserverRef.current = frameObserver;
         applyHeight();
         // The ResizeObserver only fires on body's border box; a content overflow
         // that grows scrollHeight without resizing that box (e.g. a height:100%
@@ -2549,7 +2657,7 @@ export function EmailViewer({
   const handlePrint = () => {
     if (!email) return;
     const printSender = email.from?.[0];
-    const date = email.sentAt ? formatDateTime(email.sentAt, timeFormat, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' }) : '';
+    const date = formatDateTime(emailDisplayDate(email), timeFormat, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' });
     const formatRecipient = (r: { name?: string | null; email: string }) =>
       r.name ? `${escapeHtml(r.name)} &lt;${escapeHtml(r.email)}&gt;` : escapeHtml(r.email);
     const toList = email.to?.map(formatRecipient).join(', ') || '';
@@ -2579,7 +2687,7 @@ export function EmailViewer({
   .body { font-size: 14px; line-height: 1.6; }
   .body img { max-width: 100% !important; height: auto !important; }
   @media print { body { margin: 20px; } }
-</style></head><body>
+</style></head><body dir="auto">
 <div class="header">
   <div class="subject">${escapeHtml(subjectText)}</div>
   <div class="meta">
@@ -2676,7 +2784,7 @@ export function EmailViewer({
         subject: t('read_receipt.mdn_subject', { subject: email.subject || '' }),
         humanText: t('read_receipt.mdn_body', { recipient: receiptIdentity.email }),
       });
-      await client.setKeyword(email.id, '$mdnsent');
+      await useEmailStore.getState().markEmailKeyword(client, email.id, '$mdnsent');
     } catch (err) {
       // Surface the failure instead of silently resetting the banner so we can
       // see which step (upload / import / submission) failed.
@@ -2693,7 +2801,7 @@ export function EmailViewer({
     if (client && email) {
       // $MDNSent is the RFC 3503 flag every IMAP/JMAP client honours, so the
       // request is suppressed everywhere - not just locally.
-      try { await client.setKeyword(email.id, '$mdnsent'); } catch { /* best effort */ }
+      try { await useEmailStore.getState().markEmailKeyword(client, email.id, '$mdnsent'); } catch { /* best effort */ }
     }
   }, [client, email]);
 
@@ -2807,23 +2915,24 @@ export function EmailViewer({
         </div>
       );
     }
+    // Rendered in Pro (embedded) too: a silent void here read as "broken"
+    // in a split pane - the empty reading pane should always say what it is
+    // and offer a way forward.
     return (
       <div className={cn("flex-1 flex flex-col items-center justify-center bg-gradient-to-br from-muted/30 to-muted/50", className)}>
-        {!isEmbedded && (
-          <div className="text-center p-8">
-            <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-background shadow-lg flex items-center justify-center">
-              <Mail className="w-10 h-10 text-muted-foreground" />
-            </div>
-            <h3 className="text-xl font-semibold text-foreground mb-2">{t('no_conversation_selected')}</h3>
-            <p className="text-muted-foreground">{t('no_conversation_description')}</p>
-            {onCompose && (
-              <Button onClick={onCompose} className="mt-6" title={t('compose_hint')}>
-                <PenSquare className="w-4 h-4 me-2" />
-                {t('compose')}
-              </Button>
-            )}
+        <div className="text-center p-8">
+          <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-background shadow-lg flex items-center justify-center">
+            <Mail className="w-10 h-10 text-muted-foreground" />
           </div>
-        )}
+          <h3 className="text-xl font-semibold text-foreground mb-2">{t('no_conversation_selected')}</h3>
+          <p className="text-muted-foreground">{t('no_conversation_description')}</p>
+          {onCompose && (
+            <Button onClick={onCompose} className="mt-6" title={t('compose_hint')}>
+              <PenSquare className="w-4 h-4 me-2" />
+              {t('compose')}
+            </Button>
+          )}
+        </div>
       </div>
     );
   }
@@ -3072,7 +3181,11 @@ export function EmailViewer({
           </Button>
         )}
 
-        {/* Toggle read state */}
+        {/* Toggle read state.
+            Both "Read" and "Unread" labels are rendered stacked in one grid cell
+            (the inactive one invisible) so the button keeps a fixed width when the
+            email is auto-marked as read on open. Otherwise the width change re-runs
+            the overflow calculation and the toolbar buttons jump around (#864). */}
         <Button
           variant="ghost"
           size="sm"
@@ -3083,7 +3196,12 @@ export function EmailViewer({
           title={isUnread ? t('mark_read') : t('mark_unread')}
         >
           {isUnread ? <MailOpen className="w-4 h-4" /> : <Mail className="w-4 h-4" />}
-          {showToolbarLabels && <span className="text-[10px] leading-tight sm:text-sm">{isUnread ? t('read') : t('unread')}</span>}
+          {showToolbarLabels && (
+            <span className="grid text-center text-[10px] leading-tight sm:text-sm">
+              <span className={cn("col-start-1 row-start-1", !isUnread && "invisible")} aria-hidden={!isUnread}>{t('read')}</span>
+              <span className={cn("col-start-1 row-start-1", isUnread && "invisible")} aria-hidden={isUnread}>{t('unread')}</span>
+            </span>
+          )}
         </Button>
 
         {/* Print - hidden on mobile, overflows to More menu */}
@@ -3113,8 +3231,10 @@ export function EmailViewer({
           <Code className="w-4 h-4" />
         </Button>
 
-        {/* Dark/light mode toggle for HTML emails */}
-        {effectiveEmailContent.isHtml && (
+        {/* Dark/light mode toggle for HTML emails. Always mounted: `isHtml`
+            flips from false to true once the body arrives, and mounting the
+            button then changes the toolbar width and re-runs the overflow
+            calculation, so the other buttons jump. Disable it instead. (#964) */}
         <Button
           variant="ghost"
           size="sm"
@@ -3123,8 +3243,25 @@ export function EmailViewer({
           data-overflow-priority="11"
           className="hidden sm:inline-flex h-8 gap-1.5"
           title={isDark ? 'View in light mode' : 'View in dark mode'}
+          disabled={!effectiveEmailContent.isHtml}
+          aria-disabled={!effectiveEmailContent.isHtml}
         >
           {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+        </Button>
+
+        {/* Fullscreen toggle - hidden on mobile (already fullscreen there).
+            Never overflows into the More menu: in fullscreen this button is
+            the way back out, so it must stay visible. */}
+        {onToggleFullscreen && (
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onToggleFullscreen}
+          className="hidden sm:inline-flex h-8 gap-1.5"
+          title={isFullscreen ? t('exit_fullscreen') : t('fullscreen')}
+          aria-label={isFullscreen ? t('exit_fullscreen') : t('fullscreen')}
+        >
+          {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
         </Button>
         )}
 
@@ -3140,7 +3277,7 @@ export function EmailViewer({
             aria-haspopup="menu"
             aria-expanded={moreMenuOpen}
             aria-controls={moreMenuOpen ? moreMenuId : undefined}
-            onClick={() => { setMoreMenuOpen(!moreMenuOpen); setMoreMenuSub(null); setTagMenuOpen(false); setMoveMenuOpen(false); }}
+            onClick={() => { setMoreMenuOpen(!moreMenuOpen); setMoreMenuSlideEnabled(true); setMoreMenuSub(null); setTagMenuOpen(false); setMoveMenuOpen(false); }}
           >
             <MoreVertical className="w-4 h-4 text-muted-foreground" />
             <span className="text-[10px] leading-tight sm:hidden">{t('more_actions')}</span>
@@ -3148,7 +3285,7 @@ export function EmailViewer({
           {moreMenuOpen && !isMobile && (
             <div
               ref={moreMenuListRef}
-              onKeyDown={onMoreMenuKeyDown}
+              onKeyDown={handleMoreMenuKeyDown}
               id={moreMenuId}
               role="menu"
               aria-label={t('more_actions')}
@@ -3206,10 +3343,11 @@ export function EmailViewer({
                   onMouseLeave={() => setMoreMenuSub(null)}
                 >
                   <button
+                    ref={(el) => { moreEntryRefs.current.move = el; }}
                     role="menuitem"
                     aria-haspopup="menu"
                     aria-expanded={moreMenuSub === 'move'}
-                    onClick={() => setMoreMenuSub(moreMenuSub === 'move' ? null : 'move')}
+                    onClick={() => { if (moreMenuSub === 'move') leaveMoreMenuSub(); else setMoreMenuSub('move'); }}
                     className="w-full px-3 py-1.5 text-sm text-start hover:bg-muted text-foreground flex items-center gap-2"
                   >
                     <FolderInput className="w-4 h-4" />
@@ -3217,7 +3355,11 @@ export function EmailViewer({
                     <ChevronRight className="w-3 h-3 text-muted-foreground" />
                   </button>
                   {moreMenuSub === 'move' && (
-                    <div className="absolute end-full top-0 me-1 py-1 w-48 max-h-72 overflow-y-auto bg-background rounded-md shadow-lg border border-border z-10">
+                    <div
+                      role="menu"
+                      aria-label={t('move_to')}
+                      className="absolute end-full top-0 me-1 py-1 w-48 max-h-72 overflow-y-auto bg-background rounded-md shadow-lg border border-border z-10"
+                    >
                       {(() => {
                         const renderMobileNodes = (nodes: MailboxNode[], depth = 0) => {
                           return nodes.map((node) => {
@@ -3262,10 +3404,11 @@ export function EmailViewer({
                   onMouseLeave={() => setMoreMenuSub(null)}
                 >
                   <button
+                    ref={(el) => { moreEntryRefs.current.tag = el; }}
                     role="menuitem"
                     aria-haspopup="menu"
                     aria-expanded={moreMenuSub === 'tag'}
-                    onClick={() => setMoreMenuSub(moreMenuSub === 'tag' ? null : 'tag')}
+                    onClick={() => { if (moreMenuSub === 'tag') leaveMoreMenuSub(); else setMoreMenuSub('tag'); }}
                     className="w-full px-3 py-1.5 text-sm text-start hover:bg-muted text-foreground flex items-center gap-2"
                   >
                     <Tag className="w-4 h-4" />
@@ -3273,7 +3416,11 @@ export function EmailViewer({
                     <ChevronRight className="w-3 h-3 text-muted-foreground" />
                   </button>
                   {moreMenuSub === 'tag' && (
-                    <div className="absolute end-full top-0 me-1 py-1 w-56 bg-background rounded-md shadow-lg border border-border z-10">
+                    <div
+                      role="menu"
+                      aria-label={t('tag')}
+                      className="absolute end-full top-0 me-1 py-1 w-56 bg-background rounded-md shadow-lg border border-border z-10"
+                    >
                       <TagPicker
                         selectedIds={currentTagIds}
                         onToggle={(tagId) => { if (email) onSetTag?.(email.id, tagId); }}
@@ -3403,35 +3550,54 @@ export function EmailViewer({
       data-tour="email-viewer"
       className={cn("flex-1 flex flex-row h-full bg-background overflow-hidden relative", className)}
     >
-    {/* Mobile More menu sidebar overlay */}
+    {/* Mobile More menu sidebar overlay. Inside a Pro pane both pieces
+        anchor to the viewer's relative root with absolute positioning: the
+        viewport is desktop-sized there even though the pane is phone-sized,
+        so neither viewport-fixed positioning nor the viewport-based
+        `sm:hidden` guard can be trusted (they used to leave the More button
+        opening an invisible panel in a split pane). */}
     {!isScheduled && isMobile && moreMenuOpen && (
       <div
-        className="fixed inset-0 bg-black/50 z-[60] sm:hidden"
+        className={cn(
+          "bg-black/50 z-[60]",
+          isPaneScoped ? "absolute inset-0" : "fixed inset-0 sm:hidden",
+        )}
         onClick={() => setMoreMenuOpen(false)}
       />
     )}
     {!isScheduled && isMobile && (
       <div
         ref={mobileMoreRef}
-        onKeyDown={onMobileMoreKeyDown}
+        onKeyDown={handleMobileMoreKeyDown}
         id={moreMenuId}
         role="menu"
-        aria-label={t('more_actions')}
+        /* A sub-view replaces the panel wholesale, so the panel takes its name
+           rather than pretending the top level is still on screen. */
+        aria-label={moreMenuSub === 'move' ? t('move_to') : moreMenuSub === 'tag' ? t('tag') : t('more_actions')}
         /* The panel is only slid off-screen, so without `inert` every action in
            it stays permanently exposed to screen readers - and lands near the
            top of the reading order, far from the toolbar it belongs to (#720). */
         inert={!moreMenuOpen}
         className={cn(
-        "fixed inset-y-0 right-0 w-72 bg-background border-s border-border z-[70] sm:hidden",
-        "transform transition-transform duration-300 ease-in-out",
+        "bg-background border-s border-border z-[70]",
+        isPaneScoped ? "absolute inset-y-0 right-0 w-72" : "fixed inset-y-0 right-0 w-72 sm:hidden",
+        "transform",
+        moreMenuSlideEnabled && "transition-transform duration-300 ease-in-out",
         "flex flex-col",
         moreMenuOpen ? "translate-x-0" : "translate-x-full"
       )}>
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+        {/* The fixed panel spans the full viewport height, so in the iOS PWA
+            its header would sit under the status bar without the safe-area
+            inset (same treatment as the preview modals). (#936) */}
+        <div className={cn(
+          "flex items-center justify-between px-4 border-b border-border",
+          isPaneScoped ? "py-3" : "pb-3 pt-[calc(0.75rem+env(safe-area-inset-top))]"
+        )}>
           {moreMenuSub ? (
             <button
+              ref={mobileSubBackRef}
               role="menuitem"
-              onClick={() => setMoreMenuSub(null)}
+              onClick={leaveMoreMenuSub}
               className="flex items-center gap-1 -ms-2 px-2 py-1 rounded hover:bg-muted text-sm font-semibold text-foreground"
             >
               <ChevronLeft className="w-5 h-5" />
@@ -3451,7 +3617,7 @@ export function EmailViewer({
             <X className="w-5 h-5" />
           </Button>
         </div>
-        <div className="flex-1 overflow-y-auto py-2">
+        <div ref={mobileSubListRef} className="flex-1 overflow-y-auto py-2">
           {moreMenuSub === null && (
             <>
               {/* Star toggle */}
@@ -3463,12 +3629,29 @@ export function EmailViewer({
                 <Star className={cn("w-5 h-5", isStarred && "fill-yellow-400 text-yellow-400")} />
                 {isStarred ? t('tooltips.unstar') : t('tooltips.star')}
               </button>
+              {/* Move to folder (opens sub-view). The toolbar's own Move button
+                  is the first thing dropped when the toolbar runs out of room,
+                  and on mobile the overflow has nowhere else to go - without
+                  this row a narrow screen loses the action entirely (#779). */}
+              {moveTree.length > 0 && onMoveToMailbox && (
+                <button
+                  ref={(el) => { moreEntryRefs.current.move = el; }}
+                  role="menuitem"
+                  aria-haspopup="menu"
+                  onClick={() => setMoreMenuSub('move')}
+                  className="w-full px-4 py-3 min-h-[44px] text-sm text-start hover:bg-muted text-foreground flex items-center gap-3"
+                >
+                  <FolderInput className="w-5 h-5" />
+                  <span className="flex-1">{t('move_to')}</span>
+                  <ChevronRight className="w-4 h-4 text-muted-foreground" />
+                </button>
+              )}
               {/* Tag (opens sub-view) */}
               {(emailKeywords.length > 0 || currentTagIds.length > 0) && (
                 <button
+                  ref={(el) => { moreEntryRefs.current.tag = el; }}
                   role="menuitem"
                   aria-haspopup="menu"
-                  aria-expanded={moreMenuSub === 'tag'}
                   onClick={() => setMoreMenuSub('tag')}
                   className="w-full px-4 py-3 min-h-[44px] text-sm text-start hover:bg-muted text-foreground flex items-center gap-3"
                 >
@@ -3670,7 +3853,7 @@ export function EmailViewer({
             {/* Date/time on the right of subject row - hidden on mobile, shown next to sender */}
             <div className="hidden sm:block flex-shrink-0 text-end">
               <span className="text-xs lg:text-sm text-muted-foreground whitespace-nowrap">
-                {formatDateTime(email.receivedAt, timeFormat, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })}
+                {formatDateTime(emailDisplayDate(email), timeFormat, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })}
               </span>
               {email.size > 0 && (
                 <div className="text-xs text-muted-foreground/60">
@@ -3874,6 +4057,19 @@ export function EmailViewer({
                               <Eye className="w-3.5 h-3.5 text-foreground" />
                             </button>
                           )}
+                          <PluginSlot
+                            name="attachment-actions"
+                            className="contents"
+                            extraProps={{
+                              attachment: {
+                                name: attachment.name || '',
+                                type: attachment.type,
+                                size: attachment.size,
+                                blobId: attachment.blobId,
+                                emailId: email?.id,
+                              } satisfies AttachmentInfo,
+                            }}
+                          />
                         </div>
                       </div>
                         )}
@@ -3934,6 +4130,19 @@ export function EmailViewer({
                                     <Eye className="w-3.5 h-3.5 text-foreground" />
                                   </button>
                                 )}
+                                <PluginSlot
+                                  name="attachment-actions"
+                                  className="contents"
+                                  extraProps={{
+                                    attachment: {
+                                      name: attachment.name || '',
+                                      type: attachment.type,
+                                      size: attachment.size,
+                                      blobId: attachment.blobId,
+                                      emailId: email?.id,
+                                    } satisfies AttachmentInfo,
+                                  }}
+                                />
                               </div>
                             </div>
                               )}
@@ -4035,7 +4244,7 @@ export function EmailViewer({
             {/* Date/time + size on the right (mobile) */}
             <div className="sm:hidden flex-shrink-0 text-end ms-2">
               <span className="text-xs text-muted-foreground whitespace-nowrap">
-                {formatDateTime(email.receivedAt, timeFormat, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })}
+                {formatDateTime(emailDisplayDate(email), timeFormat, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })}
               </span>
               {email.size > 0 && (
                 <div className="text-xs text-muted-foreground/60">
@@ -4665,6 +4874,19 @@ export function EmailViewer({
                         <Eye className="w-4 h-4 text-foreground" />
                       </button>
                     )}
+                    <PluginSlot
+                      name="attachment-actions"
+                      className="contents"
+                      extraProps={{
+                        attachment: {
+                          name: attachment.name || '',
+                          type: attachment.type,
+                          size: attachment.size,
+                          blobId: attachment.blobId,
+                          emailId: email?.id,
+                        } satisfies AttachmentInfo,
+                      }}
+                    />
                   </div>
                 </div>
                   )}
@@ -4725,6 +4947,19 @@ export function EmailViewer({
                               <Eye className="w-4 h-4 text-foreground" />
                             </button>
                           )}
+                          <PluginSlot
+                            name="attachment-actions"
+                            className="contents"
+                            extraProps={{
+                              attachment: {
+                                name: attachment.name || '',
+                                type: attachment.type,
+                                size: attachment.size,
+                                blobId: attachment.blobId,
+                                emailId: email?.id,
+                              } satisfies AttachmentInfo,
+                            }}
+                          />
                         </div>
                       </div>
                         )}
@@ -4806,6 +5041,19 @@ export function EmailViewer({
                           <Eye className="w-4 h-4 text-foreground" />
                         </button>
                       )}
+                      <PluginSlot
+                        name="attachment-actions"
+                        className="contents"
+                        extraProps={{
+                          attachment: {
+                            name: attachment.name || '',
+                            type: attachment.type,
+                            size: attachment.size,
+                            blobId: attachment.blobId,
+                            emailId: email?.id,
+                          } satisfies AttachmentInfo,
+                        }}
+                      />
                     </div>
                   </div>
                     )}
@@ -4865,6 +5113,19 @@ export function EmailViewer({
                                 <Eye className="w-3.5 h-3.5 text-foreground" />
                               </button>
                             )}
+                            <PluginSlot
+                              name="attachment-actions"
+                              className="contents"
+                              extraProps={{
+                                attachment: {
+                                  name: attachment.name || '',
+                                  type: attachment.type,
+                                  size: attachment.size,
+                                  blobId: attachment.blobId,
+                                  emailId: email?.id,
+                                } satisfies AttachmentInfo,
+                              }}
+                            />
                           </div>
                         </div>
                           )}
@@ -4911,9 +5172,10 @@ export function EmailViewer({
             ) : (
               <div
                 className="email-content-text text-foreground"
+                dir="auto"
                 dangerouslySetInnerHTML={{ __html: sanitizePlainTextRenderedHtml(effectiveEmailContent.html) }}
                 style={{
-                  fontFamily: 'ui-monospace, "SF Mono", Consolas, monospace',
+                  ...(plainTextFont === 'mono' && { fontFamily: 'ui-monospace, "SF Mono", Consolas, monospace' }),
                   fontSize: '14px',
                   lineHeight: '1.6',
                   wordBreak: 'break-word',
@@ -5018,10 +5280,14 @@ export function EmailViewer({
       </div>
       </div>
 
-      {/* Email Source Modal */}
+      {/* Email Source Modal - pane-scoped inside a Pro pane so it never
+          covers the neighbouring split pane. */}
       {showSourceModal && email && (
         <div
-          className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          className={cn(
+            "bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4",
+            isPaneScoped ? "absolute inset-0" : "fixed inset-0",
+          )}
           onClick={() => setShowSourceModal(false)}
         >
           <div
@@ -5066,9 +5332,14 @@ export function EmailViewer({
       )}
     </div>
 
-    {/* Mobile bottom action bar */}
+    {/* Mobile bottom action bar - pane-scoped inside a Pro pane (the
+        viewport `sm:hidden` guard would otherwise hide it there, and
+        `fixed` would span the whole app instead of the pane). */}
     {isMobile && (
-      <nav className="fixed bottom-0 left-0 right-0 z-50 bg-background border-t border-border sm:hidden overflow-hidden pb-[calc(env(safe-area-inset-bottom)/2)]">
+      <nav className={cn(
+        "z-50 bg-background border-t border-border overflow-hidden pb-[calc(env(safe-area-inset-bottom)/2)]",
+        isPaneScoped ? "absolute bottom-0 left-0 right-0" : "fixed bottom-0 left-0 right-0 sm:hidden",
+      )}>
         <div className="flex items-center overflow-x-auto mobile-scroll-hidden">
           <button
             onClick={onNavigatePrev}
@@ -5205,9 +5476,12 @@ export function EmailViewer({
           const client = useAuthStore.getState().client;
           const contactData: Partial<ContactCard> = {
             emails: { email: { address: addr } },
+            // `full` feeds the mandatory vCard FN — strict CardDAV clients
+            // (Apple Contacts) drop cards without it (#430).
             ...(name ? { name: { components: name.includes(' ')
               ? [{ kind: 'given' as const, value: name.split(' ')[0] }, { kind: 'surname' as const, value: name.split(' ').slice(1).join(' ') }]
-              : [{ kind: 'given' as const, value: name }]
+              : [{ kind: 'given' as const, value: name }],
+              isOrdered: true, full: name,
             }} : {}),
           };
           if (client && supportsSync) {

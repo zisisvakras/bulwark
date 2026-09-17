@@ -202,6 +202,9 @@
     "delete_confirm": "Opravdu chcete odstranit \"{name}\"?",
     "no_apps": "Zatím nebyly přidány žádné aplikace",
     "no_apps_hint": "Přidejte vlastní aplikace a odkazy do postranního panelu",
+    "managed_title": "Poskytnuto správcem",
+    "managed_description": "Tyto aplikace jsou nastaveny pro všechny a nelze je změnit.",
+    "managed_badge": "Spravováno",
     "search_icons": "Hledat ikony...",
     "show_popular": "Oblíbené",
     "show_all": "Všechny",
@@ -222,6 +225,10 @@
     "and_others": "a {count} dalších",
     "draft": "Koncept",
     "starred": "S hvězdičkou",
+    "pinned": "Připnuto",
+    "replied": "Zodpovězeno",
+    "forwarded": "Přeposláno",
+    "has_attachment": "Obsahuje přílohu",
     "conversations_count": "{count} z {total} konverzací",
     "conversations_count_plus": "Více než {count} konverzací",
     "conversations_count_simple": "{count} konverzací",
@@ -289,6 +296,7 @@
     "forward": "Přeposlat",
     "delete": "Odstranit",
     "archive": "Archivovat",
+    "archive_mailbox_not_found": "Archive mailbox not found - cannot archive email",
     "star": "Označit hvězdičkou",
     "unstar": "Odebrat hvězdičku",
     "mark_unread": "Označit jako nepřečtené",
@@ -300,8 +308,10 @@
     "move": "Přesunout",
     "print": "Tisk",
     "view_source": "Zobrazit zdrojový kód",
+    "fullscreen": "Celá obrazovka",
+    "exit_fullscreen": "Ukončit režim celé obrazovky",
     "export_email": "Exportovat jako .eml",
-    "forward_as_attachment": "Forward as attachment",
+    "forward_as_attachment": "Přeposlat jako přílohu",
     "import_email": "Importovat .eml nebo .zip",
     "keyboard_shortcuts": "Klávesové zkratky (?)",
     "email_source": "Zdrojový kód zprávy",
@@ -573,7 +583,12 @@
   "email_composer": {
     "read_receipt_on": "Vyžádáno potvrzení o přečtení (kliknutím vypnete)",
     "read_receipt_off": "Vyžádat potvrzení o přečtení",
+    "dsn_on": "Oznámení o doručení vyžádáno (kliknutím vypnete)",
+    "dsn_off": "Vyžádat oznámení o doručení",
+    "require_tls_on": "Šifrované doručení vyžadováno (kliknutím vypnete)",
+    "require_tls_off": "Vyžadovat šifrované doručení (TLS)",
     "new_message": "Nová zpráva",
+    "signature_edit_hint": "Dvojklikem upravíte podpis",
     "reply": "Odpovědět",
     "reply_all": "Odpovědět všem",
     "forward": "Přeposlat",
@@ -718,7 +733,11 @@
       "delete_column": "Odstranit sloupec",
       "toggle_header_row": "Přepnout řádek záhlaví",
       "delete_table": "Odstranit tabulku",
-      "pick_size": "Vybrat velikost"
+      "pick_size": "Vybrat velikost",
+      "font_size": "Velikost písma",
+      "font_size_default": "Výchozí",
+      "background_color": "Barva pozadí",
+      "remove_background_color": "Odebrat barvu pozadí"
     },
     "send_filing_warning": "Odesláno - ale následný úklid selhal, může zůstat zastaralý koncept."
   },
@@ -748,7 +767,10 @@
     "rate_limited_title": "Ověřování serveru je dočasně omezeno.",
     "rate_limited_detail": "Požadavky na pozadí byly pozastaveny, aby se zabránilo zablokování. Další pokus za {seconds} s.",
     "rate_limited_action_title": "Požadavek pozastaven, aby se zabránilo zablokování.",
-    "rate_limited_action_detail": "Aplikace čeká na ukončení doby blokování serveru před odesláním dalších ověřovaných požadavků. Zkuste to znovu za {seconds} s."
+    "rate_limited_action_detail": "Aplikace čeká na ukončení doby blokování serveru před odesláním dalších ověřovaných požadavků. Zkuste to znovu za {seconds} s.",
+    "pull_to_refresh": "Přetažením obnovíte",
+    "release_to_refresh": "Uvolněním obnovíte",
+    "refreshing": "Obnovování…"
   },
   "notifications": {
     "email_sent": "Zpráva byla úspěšně odeslána",
@@ -855,7 +877,10 @@
     "zh": "简体中文",
     "fa": "فارسی",
     "farsi": "فارسی",
-    "switch_to_farsi": "Přepnout na perštinu"
+    "switch_to_farsi": "Přepnout na perštinu",
+    "mn": "Монгол",
+    "mongolian": "Монгол",
+    "switch_to_mongolian": "Přepnout na mongolštinu"
   },
   "settings": {
     "title": "Nastavení",
@@ -910,6 +935,56 @@
       "advanced": "Pokročilé"
     },
     "appearance": {
+      "message_list_order": {
+        "label": "Pořadí seznamu zpráv",
+        "description": "Jak jsou zprávy v seznamu seřazeny. Řazení provádí server, takže platí pro celou složku, ne jen pro načtené zprávy.",
+        "preset": {
+          "chronological": "Chronologicky (nejnovější první)",
+          "unread_first": "Nepřečtené první",
+          "starred_first": "S hvězdičkou první",
+          "tagged_first": "Se štítkem první",
+          "custom": "Vlastní"
+        },
+        "tag_label": "Štítek",
+        "advanced_show": "Pokročilé: upravit úrovně řazení",
+        "advanced_hide": "Skrýt pokročilé",
+        "criterion_label": "Kritérium úrovně {n}",
+        "direction_label": "Směr úrovně {n}",
+        "criteria": {
+          "unread": "Nepřečtené",
+          "starred": "S hvězdičkou",
+          "tag": "Štítek",
+          "receivedAt": "Datum přijetí",
+          "sentAt": "Datum odeslání",
+          "from": "Odesílatel",
+          "subject": "Předmět",
+          "size": "Velikost"
+        },
+        "direction": {
+          "unread_first": "Nepřečtené první",
+          "read_first": "Přečtené první",
+          "starred_first": "S hvězdičkou první",
+          "unstarred_first": "Bez hvězdičky první",
+          "tagged_first": "Se štítkem první",
+          "untagged_first": "Bez štítku první",
+          "newest_first": "Nejnovější první",
+          "oldest_first": "Nejstarší první",
+          "a_to_z": "A → Z",
+          "z_to_a": "Z → A",
+          "largest_first": "Největší první",
+          "smallest_first": "Nejmenší první"
+        },
+        "add_level": "Přidat úroveň",
+        "remove_level": "Odebrat úroveň",
+        "move_up": "Posunout nahoru",
+        "move_down": "Posunout dolů",
+        "tiebreak_note": "Až tři úrovně; další úrovně rozhodují při shodě. „Nejnovější první“ se vždy uplatní jako poslední.",
+        "scope": {
+          "label": "Použít na všechny složky",
+          "description": "Pokud je vypnuto, pořadí platí jen pro Doručenou poštu; ostatní složky zůstávají chronologické."
+        },
+        "unsupported_note": "Váš poštovní server nepodporuje řazení podle stavu přečtení, hvězdiček ani štítků. Tyto úrovně se ignorují a seznam zůstává chronologický."
+      },
       "title": "Vzhled",
       "description": "Přizpůsobte si vzhled a chování vašeho webového e-mailu",
       "theme": {
@@ -1104,12 +1179,27 @@
         "relay_label": "Push relay",
         "relay_locked": "Nastaveno administrátorem",
         "relay_locked_desc": "URL push relay byla nastavena administrátorem a nelze ji změnit.",
-        "relay_placeholder": "https://notifications.relay.example.com",
         "status_active": "Aktivní na tomto zařízení",
         "status_busy": "Pracuji…",
         "status_inactive": "Není povoleno na tomto zařízení",
         "status_unsupported": "Tento prohlížeč nepodporuje Web Push",
-        "title": "Oznámení na pozadí"
+        "title": "Oznámení na pozadí",
+        "devices_title": "Registrovaná zařízení",
+        "devices_desc": "Všechna zařízení registrovaná pro příjem oznamení na pozadí u tohoto účtu. Odvolání okamžitě zastaví jejich příjem.",
+        "devices_loading": "Načítání registrovaných zařízení…",
+        "devices_empty": "Pro oznámení na pozadí není registrováno žádné zařízení.",
+        "devices_error": "Registrovaná zařízení se nepodařilo načíst.",
+        "devices_refresh": "Obnovit",
+        "device_this": "Toto zařízení",
+        "device_other": "Jiné zařízení",
+        "device_status_active": "Doručuje oznámení",
+        "device_status_inactive": "Nikdy nedoručilo oznámení",
+        "device_status_unknown": "Tomuto relay není známo",
+        "device_expires": "Vyprší {date}",
+        "revoke": "Odvolat",
+        "confirm_revoke_title": "Odvolat toto zařízení?",
+        "confirm_revoke_message": "Okamžitě přestane přijímat oznámení na pozadí. Opětovné zapnutí push na tom zařízení jej zaregistruje znovu.",
+        "confirm_revoke_message_this": "Toto zařízení okamžitě přestane přijímat oznámení na pozadí."
       }
     },
     "language_region": {
@@ -1150,9 +1240,19 @@
         "description": "Začátek týdne v neděli nebo v pondělí",
         "sunday": "Neděle",
         "monday": "Pondělí"
+      },
+      "time_zone": {
+        "label": "Time zone",
+        "description": "Show email and calendar times in this time zone instead of the one reported by your browser",
+        "auto": "Automatic ({zone})",
+        "preview_now": "Now:"
       }
     },
     "email_behavior": {
+      "clear_search_on_folder_change": {
+        "label": "Vymazat hledání při přepnutí složky",
+        "description": "Kliknutí na složku (Doručená pošta, Odeslaná…) vymaže aktivní hledání a zobrazí složku. Když je vypnuto, hledání zůstává a spustí se znovu ve zvolené složce."
+      },
       "request_read_receipt": {
         "label": "Standardně vyžadovat potvrzení o přečtení",
         "description": "Při psaní nové zprávy předem zapnout žádost o potvrzení o přečtení."
@@ -1188,6 +1288,12 @@
         "auto": "Automaticky (doporučeno)",
         "always": "Vždy přidat odsazení",
         "edge": "Od okraje k okraji"
+      },
+      "plain_text_font": {
+        "label": "Písmo prostého textu",
+        "description": "Písmo použité pro e-maily v prostém textu",
+        "mono": "Neproporcionální",
+        "sans": "Normální (stejné jako aplikace)"
       },
       "archive_mode": {
         "label": "Archivovat do",
@@ -1229,6 +1335,12 @@
       "auto_select_reply_identity": {
         "label": "Automaticky vybírat adresu pro odpověď",
         "description": "Při odpovídání automaticky přepnout adresu odesílatele na identitu, která původně obdržela zprávu"
+      },
+      "reply_identity_match": {
+        "label": "Porovnávání přijímací adresy",
+        "description": "Které přijímací adresy se počítají jako vaše. „Pouze přesná adresa“ vybere jen jednu z vašich nastavených identit; „stejná doména“ navíc považuje jakoukoli jinou adresu na doménách vašich identit za catch-all alias a přepíše na ni hlavičku Od. Pokud jsou tyto adresy distribuční seznamy, zvolte přesnou adresu.",
+        "exact": "Pouze přesná adresa",
+        "domain": "Jakákoli adresa na mých doménách"
       },
       "signature_position": {
         "label": "Pozice podpisu",
@@ -1358,6 +1470,22 @@
       "return_to_list_after_action": {
         "label": "Návrat do seznamu po smazání nebo označení jako nepřečtené",
         "description": "Po smazání nebo označení otevřené zprávy jako nepřečtené se vrátit do seznamu zpráv místo otevření následující zprávy."
+      },
+      "swipe_right_action": {
+        "label": "Akce při přejetí doprava (mobil)",
+        "description": "Na dotykových zařízeních akce, která se provede při přejetí zprávy v seznamu doprava."
+      },
+      "swipe_left_action": {
+        "label": "Akce při přejetí doleva (mobil)",
+        "description": "Na dotykových zařízeních akce, která se provede při přejetí zprávy v seznamu doleva."
+      },
+      "swipe_actions": {
+        "none": "Žádná",
+        "archive": "Archivovat",
+        "delete": "Odstranit",
+        "mark_read": "Přepnout přečteno",
+        "star": "Přepnout hvězdičku",
+        "spam": "Označit jako spam"
       },
       "rtl_editing": {
         "label": "Podpora psaní zprava doleva",
@@ -1656,11 +1784,14 @@
       "role_trash": "Koš",
       "role_junk": "Spam / Nevyžádaná pošta",
       "role_archive": "Archiv",
+      "role_scheduled": "Scheduled",
+      "role_snoozed": "Snoozed",
       "role_none": "Žádná",
       "create_folder": "Vytvořit složku",
       "create_subfolder": "Vytvořit podsložku",
       "reorder": "Přetažením změníte pořadí",
       "reorder_error": "Nepodařilo se změnit pořadí složek",
+      "move_error": "Nepodařilo se přesunout složku",
       "subfolder_of": "Ve složce {name}",
       "subfolder_name": "Název podsložky",
       "new_folder_name": "Název složky",
@@ -1755,6 +1886,8 @@
       "description": "Spravujte vlastní aplikace a odkazy v postranním panelu",
       "keep_loaded": "Ponechat aplikace načtené",
       "keep_loaded_description": "Udržovat vložené aplikace spuštěné na pozadí během přepínání, aby se předešlo jejich opětovnému načítání",
+      "managed_title": "Poskytnuto správcem",
+      "managed_description": "Tyto aplikace jsou nastaveny pro všechny a nelze je změnit.",
       "manage_title": "Vlastní aplikace",
       "manage_description": "Přidávat, upravovat nebo odebírat vlastní aplikace z postranního panelu"
     },
@@ -1762,6 +1895,8 @@
       "title": "Kontakty",
       "description": "Import a export kontaktů",
       "group_by_letter_label": "Seskupit podle prvního písmena",
+      "sort_by_last_name_label": "Řadit podle příjmení",
+      "sort_by_last_name_description": "Seřadit seznam kontaktů podle příjmení, aby členové rodiny byli pohromadě",
       "group_by_letter_description": "Zobrazit záhlaví sekcí podle abecedy v seznamu kontaktů",
       "import_label": "Importovat kontakty",
       "import_description": "Importovat kontakty ze souboru vCard (.vcf)",
@@ -2097,6 +2232,7 @@
     "new_subfolder": "Nová podsložka...",
     "new_folder": "Nová složka...",
     "rename": "Přejmenovat...",
+    "share": "Sdílet...",
     "import_email": "Importovat .eml nebo .zip...",
     "empty_folder": "Vyprázdnit složku",
     "empty_folder_generic": "Vyprázdnit složku",
@@ -2126,7 +2262,10 @@
     "toast_error_rename": "Nepodařilo se přejmenovat složku",
     "toast_error_delete": "Nepodařilo se smazat složku",
     "toast_error_delete_has_children": "Složka obsahuje podsložky. Nejprve je odstraňte.",
-    "toast_error_delete_has_email": "Složka není prázdná. Nejprve ji vyprázdněte."
+    "toast_error_delete_has_email": "Složka není prázdná. Nejprve ji vyprázdněte.",
+    "delete_with_contents_title": "Složka není prázdná",
+    "delete_with_contents_message": "Složka „{name}“ stále obsahuje {count, plural, one {1 zprávu} few {# zprávy} other {# zpráv}}. Smazat složku i všechny její zprávy? Tuto akci nelze vrátit.",
+    "delete_with_contents_confirm": "Smazat složku i zprávy"
   },
   "shortcuts": {
     "title": "Klávesové zkratky",
@@ -2160,7 +2299,8 @@
       "search": "Přejít do hledání",
       "help": "Zobrazit zkratky",
       "refresh": "Obnovit zprávy",
-      "select_all": "Vybrat vše"
+      "select_all": "Vybrat vše",
+      "global_search": "Hledat ve všem"
     },
     "threads": {
       "expand_collapse": "Rozbalit/sbalit vlákno"
@@ -2324,6 +2464,9 @@
       "renamed": "Adresář byl přejmenován",
       "rename_failed": "Přejmenování adresáře selhalo",
       "default": "Výchozí",
+      "set_default": "Nastavit jako výchozí",
+      "default_updated": "Výchozí adresář aktualizován",
+      "set_default_failed": "Nepodařilo se nastavit výchozí adresář",
       "manage": "Spravovat adresáře",
       "share": "Sdílet adresář",
       "new_contact_in_book": "Nový kontakt v tomto adresáři",
@@ -2608,7 +2751,10 @@
       "any_month": "Kterýkoli měsíc",
       "has_email": "Má e-mail",
       "has_phone": "Má telefon",
-      "has_photo": "Má fotku"
+      "has_photo": "Má fotku",
+      "sort_by": "Řadit podle",
+      "sort_first_name": "Jméno",
+      "sort_last_name": "Příjmení"
     },
     "open_categories": "Otevřít kategorie"
   },
@@ -2645,6 +2791,10 @@
       "duplicate": "Duplikovat",
       "today_header": "Dnes",
       "tomorrow_header": "Zítra",
+      "agenda_show_earlier": "Zobrazit dřívější události",
+      "agenda_loading": "Načítání…",
+      "agenda_range_start": "Události od {date}",
+      "agenda_range_end": "Události do {date}",
       "export_ics": "Exportovat jako .ics",
       "copy_title": "Kopírovat název",
       "copy_link": "Kopírovat odkaz na schůzku",
@@ -2680,6 +2830,14 @@
       "color": "Barva"
     },
     "participants": {
+      "availability": {
+        "title": "Dostupnost",
+        "free": "Volný",
+        "busy": "Zaneprázdněn",
+        "tentative": "Předběžně",
+        "unknown": "Není uživatelem tohoto serveru",
+        "checking": "Ověřuje se…"
+      },
       "title": "Účastníci",
       "add": "Přidat účastníka",
       "organizer": "Organizátor",
@@ -2792,6 +2950,8 @@
       "show_time_in_month_view_desc": "Zobrazovat časy událostí v měsíčním zobrazení kalendáře",
       "show_week_numbers": "Zobrazit čísla týdnů",
       "show_week_numbers_desc": "Zobrazovat čísla týdnů v minikalendáři",
+      "calendar_free_scroll": "Volné posouvání",
+      "calendar_free_scroll_desc": "Plynule procházet měsíce, týdny a dny místo jednoho období najednou",
       "enable_tasks": "Povolit úkoly",
       "enable_tasks_desc": "Zobrazovat zobrazení úkolů v kalendáři pro správu úkolů",
       "show_tasks_on_calendar": "Zobrazit úkoly v kalendáři",
@@ -2803,6 +2963,9 @@
       "hover_preview_delay_1s": "Zpoždění 1 sekunda",
       "hover_preview_delay_2s": "Zpoždění 2 sekundy",
       "hover_preview_off": "Vypnuto",
+      "organizer_identity": "Organizovat pozvánky jako",
+      "organizer_identity_desc": "Adresa kalendáře použitá jako organizátor, když zvete lidi na události.",
+      "organizer_identity_failed": "Nepodařilo se změnit adresu organizátora",
       "show_birthday_calendar": "Kalendář narozenin",
       "show_birthday_calendar_desc": "Zobrazovat virtuální kalendář s narozeninami z vašich kontaktů"
     },
@@ -2922,7 +3085,12 @@
       "copy_url": "Kopírovat URL CalDAV",
       "url_copied": "URL CalDAV zkopírováno do schránky",
       "share": "Sdílet kalendář",
-      "new_event_in_calendar": "Nová událost v tomto kalendáři"
+      "new_event_in_calendar": "Nová událost v tomto kalendáři",
+      "kind": "Obsah",
+      "kind_events": "Události",
+      "kind_tasks": "Úkoly",
+      "kind_both": "Události a úkoly",
+      "kind_hint": "Určuje, které aplikace tento kalendář uvidí při synchronizaci přes CalDAV. Později to nelze změnit."
     },
     "subscription": {
       "title": "Odběr iCal",
@@ -3046,6 +3214,8 @@
     "has_attachment": "Obsahuje přílohu",
     "date_after": "Po",
     "date_before": "Před",
+    "size_min": "Větší než (KB)",
+    "size_max": "Menší než (KB)",
     "starred": "S hvězdičkou",
     "unread": "Nepřečtené",
     "read": "Přečtené",
@@ -3059,7 +3229,12 @@
     "search_hint": "Použijte pokročilé filtry pro přesné vyhledávání",
     "advanced_filters_tooltip": "Pokročilé filtry hledání",
     "results_found": "{count, plural, =0 {Nenalezeny žádné výsledky} one {Nalezen 1 výsledek} few {Nalezeny # výsledky} other {Nalezeno # výsledků}}",
-    "results_found_more": "Nalezeno více než {count} výsledků"
+    "results_found_more": "Nalezeno více než {count} výsledků",
+    "suggestions_recent": "Nedávná hledání",
+    "suggestions_people": "Lidé",
+    "suggestions_from": "Hledat e-maily od {address}",
+    "suggestions_to": "Hledat e-maily pro {address}",
+    "suggestions_remove_recent": "Odebrat z nedávných hledání"
   },
   "welcome": {
     "title": "Vítejte ve své poštovní schránce",
@@ -3082,6 +3257,10 @@
     "hint": "Klikněte na libovolnou zprávu vlevo pro začátek, nebo využijte průvodce níže."
   },
   "files": {
+    "office_edit": "Upravit dokument",
+    "office_loading": "Otevírání editoru dokumentů…",
+    "office_error": "Editor dokumentů se nepodařilo otevřít.",
+    "office_close": "Zavřít editor",
     "open_in_new_tab": "Otevřít na nové kartě",
     "title": "Soubory",
     "search_placeholder": "Hledat soubory...",
@@ -3328,6 +3507,25 @@
   "unified_mailbox": {
     "search_unavailable": "Vyhledávání není ve sjednoceném zobrazení k dispozici"
   },
+  "calendar_event_notifications": {
+    "someone": "Někdo",
+    "invited": "{name} vás pozval(a) na „{title}“",
+    "updated": "{name} aktualizoval(a) „{title}“",
+    "cancelled": "{name} zrušil(a) „{title}“",
+    "untitled": "Událost bez názvu"
+  },
+  "share_notifications": {
+    "someone": "Někdo",
+    "shared": "{name} s vámi sdílí {kind} „{object}“",
+    "changed": "{name} změnil(a) váš přístup k {kind} „{object}“",
+    "revoked": "{name} odebral(a) váš přístup k {kind} „{object}“",
+    "object": {
+      "folder": "složku",
+      "calendar": "kalendář",
+      "address_book": "adresář",
+      "files": "složku souborů"
+    }
+  },
   "sharing": {
     "title": "Sdílet „{name}\"",
     "description": "Udělte přístup dalším uživatelům nebo skupinám na tomto serveru. Změny se projeví okamžitě.",
@@ -3378,5 +3576,45 @@
     "copy_event": "Kopírovat odkaz na událost",
     "copied": "Odkaz zkopírován",
     "copy_failed": "Odkaz se nepodařilo zkopírovat"
+  },
+  "plugins": {
+    "oauth_callback": {
+      "completing": "Dokončování autorizace…",
+      "completing_message": "Počkejte prosím, než se naváže spojení.",
+      "received_title": "Autorizace přijata",
+      "received_message": "Můžete se vrátit na kartu, kde jste zahájili připojení.",
+      "failed_title": "Autorizace se nezdařila",
+      "denied": "Autorizace byla zamítnuta.",
+      "failed_detail": "Autorizace se nezdařila: {error}",
+      "missing_params": "Chybí autorizační kód nebo stav.",
+      "delivery_failed": "Výsledek autorizace se nepodařilo předat kartě aplikace. Zavřete toto okno a zkuste to znovu."
+    }
+  },
+  "global_search": {
+    "title": "Hledat ve všem",
+    "placeholder": "Hledat v poště, kontaktech, kalendáři, souborech...",
+    "scope_label": "Hledat v",
+    "account_label": "Účet",
+    "scope_all": "Vše",
+    "scope_mail": "Pošta",
+    "scope_contacts": "Kontakty",
+    "scope_calendar": "Kalendář",
+    "scope_files": "Soubory",
+    "all_accounts": "Všechny účty",
+    "show_all": "Zobrazit všechny výsledky",
+    "no_results": "Žádné výsledky pro „{query}“",
+    "server_hint": "Celá slova prohledávají server; části slov odpovídají již načteným položkám",
+    "searching": "Hledání...",
+    "account_error": "Nepodařilo se prohledat {account}",
+    "recent_searches": "Nedávná hledání",
+    "recurring": "Opakovaná",
+    "no_subject": "(no subject)",
+    "empty_hint": "Hledejte poštu, kontakty, události a soubory ve všech účtech. Zkuste from:, subject:, has:attachment, after:2026-01-01.",
+    "flat_by_date": "Ploše podle data",
+    "grouped": "Seskupené",
+    "load_more": "Načíst další",
+    "preview_empty": "Vyberte výsledek pro náhled",
+    "open_full": "Otevřít",
+    "view_label": "Zobrazení"
   }
 }

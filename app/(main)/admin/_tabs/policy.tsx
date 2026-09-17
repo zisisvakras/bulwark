@@ -1,10 +1,19 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Save, Loader2, Lock } from 'lucide-react';
-import type { SettingsPolicy, FeatureGates } from '@/lib/admin/types';
+import { Save, Loader2, Lock, Plus, Trash2, ArrowUp, ArrowDown } from 'lucide-react';
+import { icons as lucideIcons, type LucideIcon } from 'lucide-react';
+import type { SettingsPolicy, FeatureGates, PushRelayOption, AdminSidebarApp } from '@/lib/admin/types';
 import { DEFAULT_FEATURE_GATES, DEFAULT_POLICY } from '@/lib/admin/types';
 import { apiFetch } from '@/lib/browser-navigation';
+import { DEFAULT_SIDEBAR_APP_ID_PREFIX, MAX_DEFAULT_SIDEBAR_APPS } from '@/lib/sidebar-apps';
+import { generateUUID } from '@/lib/utils';
+import {
+  DEFAULT_RELAY_BASE_URL,
+  isValidRelayUrl,
+  normalizeRelayUrl,
+  resolveDefaultRelayUrl,
+} from '@/lib/push-relays';
 
 // `allMailViewEnabled` is deprecated (folded into `crossAllViewEnabled`, normalized
 // forward on policy load), so it is hidden from the admin UI.
@@ -43,12 +52,23 @@ const RESTRICTABLE_SETTINGS = [
   { key: 'sendConfirmation', label: 'Send Confirmation', category: 'Composer', type: 'boolean' },
   { key: 'defaultReplyMode', label: 'Default Reply Mode', category: 'Composer', type: 'enum', allowedValues: ['reply', 'reply-all'] },
   { key: 'autoSelectReplyIdentity', label: 'Auto-select Reply Identity', category: 'Composer', type: 'boolean' },
+  { key: 'replyIdentityMatch', label: 'Reply Identity Matching', category: 'Composer', type: 'enum', allowedValues: ['exact', 'domain'] },
   { key: 'plainTextMode', label: 'Plain Text Only', category: 'Composer', type: 'boolean' },
   { key: 'sessionTimeout', label: 'Session Timeout', category: 'Privacy', type: 'number' },
   { key: 'emailNotificationsEnabled', label: 'Email Notifications', category: 'Notifications', type: 'boolean' },
   { key: 'calendarNotificationsEnabled', label: 'Calendar Notifications', category: 'Notifications', type: 'boolean' },
   { key: 'debugMode', label: 'Debug Mode', category: 'Advanced', type: 'boolean' },
 ];
+
+/** Mirrors the sanitizer's URL rule so the admin sees the drop before saving. */
+function isValidDefaultAppUrl(raw: string): boolean {
+  try {
+    const parsed = new URL(raw.trim());
+    return (parsed.protocol === 'https:' || parsed.protocol === 'http:') && !!parsed.host;
+  } catch {
+    return false;
+  }
+}
 
 export function PolicyTab() {
   const [policy, setPolicy] = useState<SettingsPolicy>({ ...DEFAULT_POLICY });
@@ -87,8 +107,90 @@ export function PolicyTab() {
     setMessage(null);
   }
 
+  function updatePushRelay(index: number, patch: Partial<PushRelayOption>) {
+    setPolicy(prev => ({
+      ...prev,
+      pushRelays: (prev.pushRelays ?? []).map((relay, i) => (i === index ? { ...relay, ...patch } : relay)),
+    }));
+    setDirty(true);
+    setMessage(null);
+  }
+
+  function addPushRelay() {
+    setPolicy(prev => ({ ...prev, pushRelays: [...(prev.pushRelays ?? []), { label: '', url: '' }] }));
+    setDirty(true);
+    setMessage(null);
+  }
+
+  function removePushRelay(index: number) {
+    setPolicy(prev => {
+      const remaining = (prev.pushRelays ?? []).filter((_, i) => i !== index);
+      const removedUrl = normalizeRelayUrl((prev.pushRelays ?? [])[index]?.url);
+      // Dropping the relay users are defaulted to would leave a dangling
+      // default, so fall back to the built-in one.
+      const pushRelayUrl = normalizeRelayUrl(prev.pushRelayUrl) === removedUrl ? '' : prev.pushRelayUrl;
+      return { ...prev, pushRelays: remaining, pushRelayUrl };
+    });
+    setDirty(true);
+    setMessage(null);
+  }
+
   function togglePushRelayLocked() {
     setPolicy(prev => ({ ...prev, pushRelayUrlLocked: !prev.pushRelayUrlLocked }));
+    setDirty(true);
+    setMessage(null);
+  }
+
+  function updateDefaultApp(index: number, patch: Partial<AdminSidebarApp>) {
+    setPolicy(prev => ({
+      ...prev,
+      defaultSidebarApps: (prev.defaultSidebarApps ?? []).map((app, i) => (i === index ? { ...app, ...patch } : app)),
+    }));
+    setDirty(true);
+    setMessage(null);
+  }
+
+  function addDefaultApp() {
+    setPolicy(prev => {
+      const apps = prev.defaultSidebarApps ?? [];
+      if (apps.length >= MAX_DEFAULT_SIDEBAR_APPS) return prev;
+      return {
+        ...prev,
+        defaultSidebarApps: [
+          ...apps,
+          {
+            id: `${DEFAULT_SIDEBAR_APP_ID_PREFIX}${generateUUID()}`,
+            name: '',
+            url: '',
+            icon: 'Globe',
+            openMode: 'tab' as const,
+            showOnMobile: false,
+          },
+        ],
+      };
+    });
+    setDirty(true);
+    setMessage(null);
+  }
+
+  function removeDefaultApp(index: number) {
+    setPolicy(prev => ({
+      ...prev,
+      defaultSidebarApps: (prev.defaultSidebarApps ?? []).filter((_, i) => i !== index),
+    }));
+    setDirty(true);
+    setMessage(null);
+  }
+
+  /** Rail order follows this list, so admins need to be able to reorder it. */
+  function moveDefaultApp(index: number, delta: number) {
+    setPolicy(prev => {
+      const apps = [...(prev.defaultSidebarApps ?? [])];
+      const target = index + delta;
+      if (target < 0 || target >= apps.length) return prev;
+      [apps[index], apps[target]] = [apps[target], apps[index]];
+      return { ...prev, defaultSidebarApps: apps };
+    });
     setDirty(true);
     setMessage(null);
   }
@@ -147,6 +249,8 @@ export function PolicyTab() {
   }
 
   const categories = [...new Set(RESTRICTABLE_SETTINGS.map(s => s.category))];
+  const defaultRelayUrl = resolveDefaultRelayUrl(policy);
+  const defaultSidebarApps = policy.defaultSidebarApps ?? [];
 
   return (
     <div className="space-y-6">
@@ -205,29 +309,275 @@ export function PolicyTab() {
 
       <div className="border border-border rounded-lg">
         <div className="px-4 py-3 border-b border-border bg-muted/30">
-          <h2 className="text-sm font-medium text-foreground">Push Relay</h2>
-          <p className="text-xs text-muted-foreground mt-0.5">Override the Web Push relay URL shown in user notification settings. Leave empty to use the built-in default.</p>
+          <h2 className="text-sm font-medium text-foreground">Push Relays</h2>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Relays users can pick from in notification settings. The built-in Bulwark relay is always
+            offered; add your own here. Users choose from this list - they cannot enter a URL.
+          </p>
         </div>
         <div className="px-4 py-3 space-y-3">
-          <input
-            type="url"
-            inputMode="url"
-            autoComplete="off"
-            spellCheck={false}
-            value={policy.pushRelayUrl ?? ''}
-            onChange={(e) => setPushRelayUrl(e.target.value)}
-            placeholder="https://notifications.relay.example.com"
-            className="w-full rounded border border-input bg-background px-3 py-2 text-sm"
-          />
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <span className="text-sm font-medium text-foreground">Relays</span>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Mark one as the default. Relays without a valid URL are not offered to users.
+              </p>
+            </div>
+            <button
+              onClick={addPushRelay}
+              className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md border border-input bg-background text-xs text-foreground hover:bg-muted transition-colors shrink-0"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Add relay
+            </button>
+          </div>
+
+          <div className="rounded-md border border-border bg-muted/20 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-foreground">Bulwark relay</span>
+                  <span className="text-[10px] font-medium uppercase tracking-wider px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                    built-in
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground mt-0.5 truncate">{DEFAULT_RELAY_BASE_URL}</p>
+              </div>
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer shrink-0">
+                <input
+                  type="radio"
+                  name="default-push-relay"
+                  checked={defaultRelayUrl === normalizeRelayUrl(DEFAULT_RELAY_BASE_URL)}
+                  onChange={() => setPushRelayUrl('')}
+                  className="border-input"
+                />
+                Default
+              </label>
+            </div>
+          </div>
+
+          {(policy.pushRelays ?? []).map((relay, index) => (
+            <div key={index} className="rounded-md border border-border bg-muted/20 p-3 space-y-2">
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-start">
+                <div className="sm:col-span-4">
+                  <label className="block text-[11px] font-medium text-muted-foreground mb-1">Name</label>
+                  <input
+                    type="text"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={relay.label}
+                    onChange={(e) => updatePushRelay(index, { label: e.target.value })}
+                    placeholder="Company relay"
+                    className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  />
+                </div>
+                <div className="sm:col-span-8">
+                  <label className="block text-[11px] font-medium text-muted-foreground mb-1">Relay URL</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="url"
+                      inputMode="url"
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={relay.url}
+                      onChange={(e) => updatePushRelay(index, { url: e.target.value })}
+                      placeholder="https://notifications.relay.example.com"
+                      className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    />
+                    <button
+                      onClick={() => removePushRelay(index)}
+                      className="shrink-0 text-muted-foreground hover:text-destructive"
+                      title="Remove relay"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer w-fit">
+                <input
+                  type="radio"
+                  name="default-push-relay"
+                  checked={isValidRelayUrl(relay.url) && defaultRelayUrl === normalizeRelayUrl(relay.url)}
+                  disabled={!isValidRelayUrl(relay.url)}
+                  onChange={() => setPushRelayUrl(normalizeRelayUrl(relay.url))}
+                  className="border-input disabled:opacity-40"
+                />
+                Default
+              </label>
+            </div>
+          ))}
+
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer w-fit">
             <input
               type="checkbox"
               checked={!!policy.pushRelayUrlLocked}
               onChange={togglePushRelayLocked}
               className="rounded border-input"
             />
-            <Lock className="w-3 h-3" /> Lock - users cannot change this URL
+            <Lock className="w-3 h-3" /> Lock - users are pinned to the default relay
           </label>
+        </div>
+      </div>
+
+      <div className="border border-border rounded-lg">
+        <div className="px-4 py-3 border-b border-border bg-muted/30">
+          <h2 className="text-sm font-medium text-foreground">Default Sidebar Apps</h2>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Apps every user gets in the navigation rail without configuring anything. They appear
+            above the user&apos;s own apps and cannot be edited or removed by users. Independent of
+            the Sidebar Apps feature gate above, which only governs user-added apps.
+          </p>
+        </div>
+        <div className="px-4 py-3 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <span className="text-sm font-medium text-foreground">Apps</span>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Entries without a name or a valid http(s) URL are dropped when saving. Inline apps
+                are framed inside the webmail, so the target must allow being embedded.
+              </p>
+            </div>
+            <button
+              onClick={addDefaultApp}
+              disabled={defaultSidebarApps.length >= MAX_DEFAULT_SIDEBAR_APPS}
+              className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md border border-input bg-background text-xs text-foreground hover:bg-muted transition-colors shrink-0 disabled:opacity-50 disabled:pointer-events-none"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Add app
+            </button>
+          </div>
+
+          {defaultSidebarApps.length === 0 && (
+            <p className="text-xs text-muted-foreground py-2">
+              No default apps. Users only see the apps they add themselves.
+            </p>
+          )}
+
+          {defaultSidebarApps.map((app, index) => {
+            const AppIcon = lucideIcons[app.icon as keyof typeof lucideIcons] as LucideIcon | undefined;
+            const urlInvalid = app.url.trim().length > 0 && !isValidDefaultAppUrl(app.url);
+            return (
+              <div key={app.id} className="rounded-md border border-border bg-muted/20 p-3 space-y-2">
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-start">
+                  <div className="sm:col-span-4">
+                    <label className="block text-[11px] font-medium text-muted-foreground mb-1">Name</label>
+                    <input
+                      type="text"
+                      autoComplete="off"
+                      spellCheck={false}
+                      maxLength={50}
+                      value={app.name}
+                      onChange={(e) => updateDefaultApp(index, { name: e.target.value })}
+                      placeholder="Intranet"
+                      className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    />
+                  </div>
+                  <div className="sm:col-span-5">
+                    <label className="block text-[11px] font-medium text-muted-foreground mb-1">URL</label>
+                    <input
+                      type="url"
+                      inputMode="url"
+                      autoComplete="off"
+                      spellCheck={false}
+                      maxLength={2048}
+                      value={app.url}
+                      onChange={(e) => updateDefaultApp(index, { url: e.target.value })}
+                      placeholder="https://intranet.example.com"
+                      className={`h-8 w-full rounded-md border bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${urlInvalid ? 'border-destructive' : 'border-input'}`}
+                    />
+                    {urlInvalid && (
+                      <p className="text-[11px] text-destructive mt-1">Enter a valid http or https URL</p>
+                    )}
+                  </div>
+                  <div className="sm:col-span-3">
+                    <label className="block text-[11px] font-medium text-muted-foreground mb-1">
+                      Icon (
+                      <a href="https://lucide.dev/icons" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">Lucide</a>
+                      )
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        autoComplete="off"
+                        spellCheck={false}
+                        maxLength={64}
+                        value={app.icon}
+                        onChange={(e) => updateDefaultApp(index, { icon: e.target.value })}
+                        placeholder="Globe"
+                        className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      />
+                      <span
+                        className="shrink-0 w-8 h-8 rounded-md border border-border bg-background flex items-center justify-center text-muted-foreground"
+                        title={AppIcon ? app.icon : 'Unknown icon - falls back to Globe'}
+                      >
+                        {AppIcon ? <AppIcon className="w-4 h-4" /> : <span className="text-[10px]">?</span>}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+                      <input
+                        type="radio"
+                        name={`default-app-mode-${app.id}`}
+                        checked={app.openMode !== 'inline'}
+                        onChange={() => updateDefaultApp(index, { openMode: 'tab' })}
+                        className="border-input"
+                      />
+                      New tab
+                    </label>
+                    <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+                      <input
+                        type="radio"
+                        name={`default-app-mode-${app.id}`}
+                        checked={app.openMode === 'inline'}
+                        onChange={() => updateDefaultApp(index, { openMode: 'inline' })}
+                        className="border-input"
+                      />
+                      Inline
+                    </label>
+                  </div>
+                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={app.showOnMobile}
+                      onChange={() => updateDefaultApp(index, { showOnMobile: !app.showOnMobile })}
+                      className="rounded border-input"
+                    />
+                    Show on mobile
+                  </label>
+                  <div className="flex items-center gap-1 ms-auto">
+                    <button
+                      onClick={() => moveDefaultApp(index, -1)}
+                      disabled={index === 0}
+                      className="text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:pointer-events-none p-1"
+                      title="Move up"
+                    >
+                      <ArrowUp className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => moveDefaultApp(index, 1)}
+                      disabled={index === defaultSidebarApps.length - 1}
+                      className="text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:pointer-events-none p-1"
+                      title="Move down"
+                    >
+                      <ArrowDown className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => removeDefaultApp(index)}
+                      className="text-muted-foreground hover:text-destructive p-1"
+                      title="Remove app"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
 

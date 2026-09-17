@@ -4,8 +4,8 @@
 
 - Read, compose, reply, reply-all, and forward in a Tiptap rich-text editor that handles inline images, drag-and-drop embedding, and tables
 - Gmail-style threading, expanded inline, with a conversation toggle you can switch off
-- The Unified Mailbox combines Inbox, Sent, Drafts, Junk, Archive, and Trash. By default it stays inside the active account and its shared/group folders; an admin can unlock a cross-account mode that spans every connected account.
-- All mail, Unread, and Starred obey that same account boundary and can be narrowed to a per-account folder selection. Every row names the folder its message came from.
+- The Unified Mailbox combines Inbox, Sent, Drafts, Junk, Archive, and Trash. By default it stays inside the active account and its shared/group folders; an admin can unlock a cross-account mode that spans every connected account. The combined folder rows only appear once 2+ accounts are connected (or "Include group inboxes" is on and a group inbox exists) — with just one account and no group inbox, turning the setting on adds the section header but nothing under it.
+- All mail, Unread, and Starred obey that same account boundary and can be narrowed to a per-account folder selection. Every row names the folder its message came from. Each of these three is a separate admin policy gate (see [Admin & extensibility](#admin--extensibility)) — if none are enabled for your instance, the toggles for them do not even appear in Settings → Appearance, and the Unified Mailbox section can look empty even with the feature turned on and multiple accounts connected. Ask your admin to enable the ones you need.
 - Search runs across all unified views; the per-role mailboxes add the full filter panel on top
 - Three mail layouts: split three-pane, focused list, or reading pane at the bottom
 - Drafts auto-save, keeping the chosen identity, the HTML body, and correct `In-Reply-To` / `References` headers on replies
@@ -22,6 +22,7 @@
 - Each tag can be configured to show always, only when there are unread mails or always be hidden
 - Tag names and colors live in the browser, while the tags themselves ride on your messages as JMAP keywords. A scan finds keywords no local tag explains and adds them back.
 - Star or unstar, with a configurable mark-as-read delay
+- Configurable message-list order: presets (unread first, starred first, tagged first) or up to three custom sort levels, applied server-side through the JMAP sort so the whole folder is ordered, for the Inbox only or every folder
 - Large mailboxes scroll virtually, and the first page of mail prefetches at login
 - A refresh button in the list toolbar that spins while the fetch is in flight, alongside the F5 / Ctrl+R / pull-to-refresh gestures it shares a code path with
 - Quick reply, hover actions, favicon-based sender avatars, recipient popovers
@@ -114,7 +115,7 @@
 
 ## Internationalization
 
-24 languages: Català · Česky · Dansk · Deutsch · English · Español · Français · Italiano · Latviešu · Magyar · Nederlands · Polski · Português · Română · Slovenčina · Türkçe · Русский · Українська · עברית · العربية · فارسی · 한국어 · 日本語 · 简体中文
+27 languages: Català · Česky · Dansk · Deutsch · English · Español · Français · Italiano · Latviešu · Magyar · Nederlands · Norsk bokmål · Polski · Português · Română · Slovenčina · Türkçe · Монгол · Русский · Українська · עברית · العربية · فارسی · 한국어 · 日本語 · 简体中文 · 繁體中文
 
 - Arabic, Hebrew, and Persian render right-to-left; document direction and logical layout flip automatically
 - The browser's `Accept-Language` picks the first language, and the choice persists per user

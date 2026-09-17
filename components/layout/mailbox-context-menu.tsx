@@ -21,6 +21,7 @@ import {
   FolderX,
   RefreshCw,
   Upload,
+  Users,
 } from "lucide-react";
 
 interface Position {
@@ -30,7 +31,7 @@ interface Position {
 
 export type MailboxContextTarget =
   | { kind: "mailbox"; mailbox: Mailbox; hasChildren: boolean }
-  | { kind: "folders-section" };
+  | { kind: "folders-section"; accountId?: string };
 
 const PATH_SEPARATOR = " › ";
 const MAX_PATH_LENGTH = 40;
@@ -82,9 +83,11 @@ interface MailboxContextMenuProps {
   onMarkAllFoldersRead?: () => void;
   onEmptyFolder?: (mailboxId: string) => void;
   onCreateSubfolder?: (parentId: string) => void;
-  onCreateFolder?: () => void;
+  onCreateFolder?: (accountId?: string) => void;
   onRenameFolder?: (mailboxId: string) => void;
   onDeleteFolder?: (mailboxId: string) => void;
+  /** Share the folder with other principals (mail:share); omitted when the server lacks it. */
+  onShareFolder?: (mailboxId: string) => void;
   onImportEmail?: (mailboxId: string) => void;
   onRefresh?: () => void;
 }
@@ -104,6 +107,7 @@ export function MailboxContextMenu({
   onCreateFolder,
   onRenameFolder,
   onDeleteFolder,
+  onShareFolder,
   onImportEmail,
   onRefresh,
 }: MailboxContextMenuProps) {
@@ -119,18 +123,23 @@ export function MailboxContextMenu({
   if (target.kind === "folders-section") {
     return (
       <ContextMenu ref={menuRef} isOpen={isOpen} position={position} onClose={onClose}>
-        <ContextMenuItem
-          icon={CheckCheck}
-          label={t("mark_all_folders_read")}
-          onClick={() => handleAction(onMarkAllFoldersRead!)}
-          disabled={!onMarkAllFoldersRead}
-        />
-        <ContextMenuSeparator />
+        {!target.accountId && (
+          <>
+            <ContextMenuItem
+              icon={CheckCheck}
+              label={t("mark_all_folders_read")}
+              onClick={() => handleAction(onMarkAllFoldersRead!)}
+              disabled={!onMarkAllFoldersRead}
+            />
+            <ContextMenuSeparator />
+          </>
+        )}
         <ContextMenuItem
           icon={FolderPlus}
           label={t("new_folder")}
-          onClick={() => handleAction(onCreateFolder!)}
+          onClick={() => handleAction(() => onCreateFolder?.(target.accountId))}
           disabled={!onCreateFolder}
+          testId="mailbox-new-folder"
         />
         <ContextMenuItem
           icon={RefreshCw}
@@ -153,6 +162,9 @@ export function MailboxContextMenu({
   const canSetSeen = mailbox.myRights?.maySetSeen !== false;
   const canRemoveItems = mailbox.myRights?.mayRemoveItems !== false;
   const canAddItems = mailbox.myRights?.mayAddItems !== false;
+  // Sharing needs the mail:share extension (handler present) and, on a folder
+  // someone else shared with us, their permission to re-share it.
+  const canShare = !!onShareFolder && (!mailbox.isShared || mailbox.myRights?.mayShare === true);
 
   const fullPath = getMailboxPath(mailbox, mailboxes);
 
@@ -184,13 +196,24 @@ export function MailboxContextMenu({
         label={t("new_subfolder")}
         onClick={() => handleAction(() => onCreateSubfolder?.(mailbox.id))}
         disabled={!onCreateSubfolder || !canCreateChild}
+        testId="mailbox-new-subfolder"
       />
       <ContextMenuItem
         icon={Pencil}
         label={t("rename")}
         onClick={() => handleAction(() => onRenameFolder?.(mailbox.id))}
         disabled={!onRenameFolder || !canRename}
+        testId="mailbox-rename"
       />
+      {onShareFolder && (
+        <ContextMenuItem
+          icon={Users}
+          label={t("share")}
+          onClick={() => handleAction(() => onShareFolder(mailbox.id))}
+          disabled={!canShare}
+          testId="mailbox-share"
+        />
+      )}
 
       <ContextMenuSeparator />
 
@@ -216,6 +239,7 @@ export function MailboxContextMenu({
         onClick={() => handleAction(() => onDeleteFolder?.(mailbox.id))}
         disabled={!onDeleteFolder || !canDelete}
         destructive
+        testId="mailbox-delete"
       />
 
       <ContextMenuSeparator />

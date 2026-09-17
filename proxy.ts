@@ -1,17 +1,104 @@
-import { type NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import createIntlMiddleware from "next-intl/middleware";
 import { routing } from "./i18n/routing";
+import { localeFromAcceptLanguage } from "./i18n/locale-matcher";
 import { getEnabledPluginFrameOrigins } from "./lib/admin/csp-frame-origins";
+import {
+  APP_FRAME_ORIGINS_COOKIE,
+  inlineAppFrameOrigins,
+  parseAppFrameOrigins,
+} from "./lib/security/app-frame-origins";
 import { configManager } from "./lib/admin/config-manager";
 import { detectSetupState } from "./lib/setup/state";
 
 const intlMiddleware = createIntlMiddleware(routing);
+
+/**
+ * next-intl uses best-fit locale matching, which can rank `zh` ahead of
+ * `zh-TW` for regional Traditional Chinese tags such as `zh-HK`. Collapse a
+ * Chinese Accept-Language list to the exact locale selected by Bulwark's
+ * script/region-aware matcher before handing the request to next-intl. URL
+ * prefixes and the NEXT_LOCALE cookie still keep their higher precedence.
+ */
+function withMatchedChineseAcceptLanguage(request: NextRequest): NextRequest {
+  const localeCookie = routing.localeCookie;
+  const localeCookieName =
+    localeCookie === false
+      ? null
+      : typeof localeCookie === "object" && localeCookie.name
+        ? localeCookie.name
+        : "NEXT_LOCALE";
+  const cookieLocale = localeCookieName ? request.cookies.get(localeCookieName)?.value : undefined;
+  if (cookieLocale && (routing.locales as readonly string[]).includes(cookieLocale)) return request;
+
+  const acceptLanguage = request.headers.get("accept-language");
+  const locale = localeFromAcceptLanguage(acceptLanguage, routing.locales);
+  if (locale !== "zh" && locale !== "zh-TW") return request;
+  if (acceptLanguage === locale) return request; // nothing to collapse, keep the original request
+
+  const headers = new Headers(request.headers);
+  headers.set("accept-language", locale);
+  // A cloned NextRequest re-parses its URL, so `nextConfig` has to be handed
+  // over as well: without it the base path stays glued to nextUrl.pathname and
+  // next-intl rewrites a sub-path install to /zh-TW/<basePath>/... (a 404)
+  // instead of /<basePath>/zh-TW/....
+  const basePath = request.nextUrl.basePath;
+  return new NextRequest(request, { headers, nextConfig: basePath ? { basePath } : undefined });
+}
 
 // Next 16's Proxy always runs on Node.js runtime and route-segment config
 // (e.g. `export const config = { matcher }`) is no longer allowed in the
 // proxy file. We replicate the previous matcher inline by short-circuiting
 // requests for API routes, Next internals and static assets.
 const PROXY_SKIP_PATTERN = /^\/(?:api|_next)(?:\/|$)|\.[^/]+$/;
+
+/**
+ * Hand the route every request header the client sent, plus `extra`.
+ *
+ * Next forwards ONLY the request headers listed in
+ * `x-middleware-override-headers` and deletes every other one. A bare
+ * NextResponse.next() carries no such list, so listing just x-nonce/x-pathname
+ * on it (as this proxy used to) stripped RSC, Next-Router-State-Tree,
+ * Next-Url, Cookie, Accept-Language, ... from every page request that skips
+ * the intl middleware: all locale-prefixed paths - i.e. every page of a
+ * NEXT_PUBLIC_LOCALE_PREFIX=always (Docker) build - plus /admin, /protocol,
+ * /setup and the plugin sandbox. Since Next 16.3 the server recomputes the
+ * `_rsc` cache-busting hash from those router headers
+ * (experimental.validateRSCRequestHeaders, on by default) and answers a
+ * mismatch with a 307 to the "expected" URL; the client re-requests, the
+ * headers are stripped again, and every navigation and link prefetch spun
+ * through a 307/200 loop for about a second - the old view stayed on screen
+ * for that long on each top-level switch and after login (#919).
+ *
+ * When the response already lists headers (the intl middleware's rewrite
+ * passes the full set), only `extra` is appended.
+ */
+function forwardRequestHeaders(
+  response: NextResponse,
+  request: NextRequest,
+  extra: Record<string, string>,
+): NextResponse {
+  // A redirect renders no route, so there is nothing to forward to.
+  if (response.headers.has("location")) return response;
+  const listed = new Set(
+    (response.headers.get("x-middleware-override-headers") ?? "")
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean),
+  );
+  if (listed.size === 0) {
+    for (const [name, value] of request.headers) {
+      listed.add(name);
+      response.headers.set(`x-middleware-request-${name}`, value);
+    }
+  }
+  for (const [name, value] of Object.entries(extra)) {
+    listed.add(name);
+    response.headers.set(`x-middleware-request-${name}`, value);
+  }
+  response.headers.set("x-middleware-override-headers", Array.from(listed).join(","));
+  return response;
+}
 
 function isSetupPath(pathname: string): boolean {
   return (
@@ -102,9 +189,46 @@ export async function proxy(request: NextRequest) {
   // Plugins may declare iframe origins they need (e.g. for embedded video).
   // Each origin is validated at install time and re-validated here.
   const pluginFrameOrigins = await getEnabledPluginFrameOrigins();
+
+  // Sidebar Apps set to open "inline" are a per-user setting the proxy can't
+  // read, so the client mirrors their origins into a cookie (#787). Ignored
+  // when the admin has turned the feature off, so a stale cookie can't keep
+  // widening the CSP after the fact.
+  const policy = configManager.getPolicy();
+  const sidebarAppsEnabled = policy.features?.sidebarAppsEnabled !== false;
+  const appFrameOrigins = sidebarAppsEnabled
+    ? parseAppFrameOrigins(request.cookies.get(APP_FRAME_ORIGINS_COOKIE)?.value)
+    : [];
+
+  // Apps the operator pins for everyone (#931) are known server-side, so their
+  // origins go straight into the header - no cookie handshake, and no reload
+  // the first time a user opens one. They survive the gate above, which only
+  // governs the apps users add themselves.
+  const managedAppFrameOrigins = inlineAppFrameOrigins(policy.defaultSidebarApps);
+
+  // WOPI document editor (#425): the editor is launched by POSTing the access
+  // token into an iframe on its origin, so that origin must be allowed in both
+  // frame-src AND form-action (which is otherwise 'self').
+  let wopiOrigin = "";
+  try {
+    const wopiClientUrl = configManager.get<string>("wopiClientUrl", "").trim();
+    if (wopiClientUrl) wopiOrigin = new URL(wopiClientUrl).origin;
+  } catch {
+    // Invalid admin-supplied URL - leave the CSP unchanged.
+  }
+
+  const frameOrigins: string[] = [];
+  const seenFrameOrigins = new Set<string>();
+  for (const origin of [...pluginFrameOrigins, ...managedAppFrameOrigins, ...appFrameOrigins, ...(wopiOrigin ? [wopiOrigin] : [])]) {
+    const key = origin.toLowerCase();
+    if (seenFrameOrigins.has(key)) continue;
+    seenFrameOrigins.add(key);
+    frameOrigins.push(origin);
+  }
+
   const frameSrc =
-    pluginFrameOrigins.length > 0
-      ? `frame-src 'self' blob: ${pluginFrameOrigins.join(" ")}`
+    frameOrigins.length > 0
+      ? `frame-src 'self' blob: ${frameOrigins.join(" ")}`
       : `frame-src 'self' blob:`;
 
   const csp = [
@@ -117,7 +241,7 @@ export async function proxy(request: NextRequest) {
     frameSrc,
     `object-src 'self' blob:`,
     `base-uri 'self'`,
-    `form-action 'self'`,
+    `form-action 'self'${wopiOrigin ? ` ${wopiOrigin}` : ""}`,
     `frame-ancestors ${frameAncestors}`,
     `media-src 'self' blob:`,
   ].join("; ");
@@ -142,23 +266,19 @@ export async function proxy(request: NextRequest) {
   let intlResponse: ReturnType<typeof intlMiddleware> | null = null;
   if (!isAdminRoute && !isProtocolRoute && !isSetupRoute && !isSandboxRoute && !hasLocalePrefix) {
     try {
-      intlResponse = intlMiddleware(request);
+      intlResponse = intlMiddleware(withMatchedChineseAcceptLanguage(request));
     } catch (error) {
       console.error('Locale middleware error:', error);
     }
   }
   const response = intlResponse ?? NextResponse.next();
 
-  const existing = response.headers.get("x-middleware-override-headers");
   // Expose the nonce AND the request pathname to server components as request
   // headers. The root (main)/layout renders <html> ABOVE the [locale] segment,
   // so getLocale() can't resolve the active locale there and falls back to the
   // default - emitting <html lang="en"> on e.g. /de pages, which makes browsers
   // offer to "translate this page". The layout reads x-pathname to recover it.
-  const overrides = [existing, "x-nonce", "x-pathname"].filter(Boolean).join(",");
-  response.headers.set("x-middleware-override-headers", overrides);
-  response.headers.set("x-middleware-request-x-nonce", nonce);
-  response.headers.set("x-middleware-request-x-pathname", pathname);
+  forwardRequestHeaders(response, request, { "x-nonce": nonce, "x-pathname": pathname });
 
   response.headers.set("X-Content-Type-Options", "nosniff");
 
